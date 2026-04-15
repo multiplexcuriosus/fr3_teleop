@@ -1,15 +1,19 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <cmath>
+#include <functional>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joy.hpp"
 #include "std_msgs/msg/u_int8.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 
 #include "franka_msgs/action/move.hpp"
-#include "fr3_husky_msgs/action/move_to_joint.hpp"
 #include "fr3_husky_msgs/action/omega_haptic.hpp"
+#include "fr3_husky_msgs/action/move_to_joint.hpp"
 
 class Ps4InputManager : public rclcpp::Node
 {
@@ -17,19 +21,42 @@ public:
   using GripperMove = franka_msgs::action::Move;
   using GripperMoveGoalHandle = rclcpp_action::ClientGoalHandle<GripperMove>;
 
+  using TeleopAction = fr3_husky_msgs::action::OmegaHaptic;
+  using TeleopGoalHandle = rclcpp_action::ClientGoalHandle<TeleopAction>;
+
   using HomeAction = fr3_husky_msgs::action::MoveToJoint;
   using HomeGoalHandle = rclcpp_action::ClientGoalHandle<HomeAction>;
-
-  using HapticAction = fr3_husky_msgs::action::OmegaHaptic;
-  using HapticGoalHandle = rclcpp_action::ClientGoalHandle<HapticAction>;
 
   Ps4InputManager() : Node("ps4_input_manager")
   {
     // Button mapping
-    button_gripper_open_ = this->declare_parameter<int>("button_gripper_open", 2);   // triangle
-    button_gripper_close_ = this->declare_parameter<int>("button_gripper_close", 0); // cross
+    button_gripper_open_ = this->declare_parameter<int>("button_gripper_open", 2);    // triangle
+    button_gripper_close_ = this->declare_parameter<int>("button_gripper_close", 0);  // cross
     axis_episode_ = this->declare_parameter<int>("axis_episode", 6);
-    button_home_ = this->declare_parameter<int>("button_home", 1);                   // circle
+    button_home_ = this->declare_parameter<int>("button_home", 1);                    // circle
+    axis_teleop_ = this->declare_parameter<int>("axis_teleop", 7);
+
+    // Teleop mapping moved from old action server
+    left_stick_x_idx_ = this->declare_parameter<int>("left_stick_x_idx", 0);
+    left_stick_y_idx_ = this->declare_parameter<int>("left_stick_y_idx", 1);
+    right_stick_y_idx_ = this->declare_parameter<int>("right_stick_y_idx", 4);
+
+    deadzone_ = this->declare_parameter<double>("deadzone", 0.08);
+    max_vx_ = this->declare_parameter<double>("max_vx", 0.08);
+    max_vy_ = this->declare_parameter<double>("max_vy", 0.08);
+    max_vz_ = this->declare_parameter<double>("max_vz", 0.05);
+
+    haptic_pos_multiplier_ = this->declare_parameter<double>("haptic_pos_multiplier", 2.0);
+    haptic_lin_vel_multiplier_ = this->declare_parameter<double>("haptic_lin_vel_multiplier", 1.0);
+    haptic_ori_multiplier_ = this->declare_parameter<double>("haptic_ori_multiplier", 1.0);
+    haptic_ang_vel_multiplier_ = this->declare_parameter<double>("haptic_ang_vel_multiplier", 1.0);
+
+    twist_topic_name_ = this->declare_parameter<std::string>("twist_topic_name", "/cartesian_cmd/twist");
+    twist_frame_id_ = this->declare_parameter<std::string>("twist_frame_id", "base_link");
+    teleop_action_name_ = this->declare_parameter<std::string>("teleop_action_name", "/cartesian_executor");
+    teleop_mode_ = this->declare_parameter<int>("teleop_mode", 0);
+    teleop_ee_name_ = this->declare_parameter<std::string>("teleop_ee_name", "right_fr3_hand_tcp");
+    teleop_move_orientation_ = this->declare_parameter<bool>("teleop_move_orientation", false);
 
     // Gripper preset widths
     gripper_open_width_ = this->declare_parameter<double>("gripper_open_width", 0.080);
@@ -42,10 +69,6 @@ public:
     home_action_name_ = this->declare_parameter<std::string>(
         "home_action_name", "/fr3_move_to_joint");
 
-    button_haptic_start_ = this->declare_parameter<int>("button_haptic_start", 7); // example only
-    haptic_action_name_ = this->declare_parameter<std::string>(
-        "haptic_action_name", "/ps4_haptic");
-
     // Home configuration
     home_joint_names_ = this->declare_parameter<std::vector<std::string>>(
         "home_joint_names",
@@ -55,39 +78,34 @@ public:
     home_joint_positions_ = this->declare_parameter<std::vector<double>>(
         "home_joint_positions",
         {
-          0.030491,
-          -0.610651,
-          -0.106314,
-          -2.916655,
-          -0.073105,
-          2.304764,
-          0.767993
+          0.4,
+          -0.785,
+          0.0,
+          -2.356,
+          0.0,
+          1.571,
+          0.785
         });
 
     home_vel_scale_ = this->declare_parameter<double>("home_vel_scale", 0.1);
     home_acc_scale_ = this->declare_parameter<double>("home_acc_scale", 0.1);
 
     episode_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/episode/control", 10);
+    twist_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(twist_topic_name_, 10);
 
     joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
         "/joy", 10,
         std::bind(&Ps4InputManager::joyCallback, this, std::placeholders::_1));
 
     gripper_client_ = rclcpp_action::create_client<GripperMove>(this, gripper_action_name_);
+  teleop_client_ = rclcpp_action::create_client<TeleopAction>(this, teleop_action_name_);
     home_client_ = rclcpp_action::create_client<HomeAction>(this, home_action_name_);
-    haptic_client_ = rclcpp_action::create_client<HapticAction>(this, haptic_action_name_);
 
     RCLCPP_INFO(this->get_logger(), "PS4 input manager started.");
   }
 
 private:
-  enum EpisodeCommand : uint8_t
-  {
-    STOP = 0,
-    START = 1
-  };
-
-  int buttonSafe(const std::vector<int32_t> &buttons, int idx) const
+  int buttonSafe(const std::vector<int32_t> & buttons, int idx) const
   {
     if (idx < 0 || idx >= static_cast<int>(buttons.size()))
     {
@@ -96,11 +114,29 @@ private:
     return buttons[idx];
   }
 
-  bool risingEdge(const std::vector<int32_t> &current, int idx) const
+  float axisSafe(const std::vector<float> & axes, int idx) const
   {
-    int curr = buttonSafe(current, idx);
-    int prev = buttonSafe(prev_buttons_, idx);
+    if (idx < 0 || idx >= static_cast<int>(axes.size()))
+    {
+      return 0.0f;
+    }
+    return axes[idx];
+  }
+
+  bool risingEdge(const std::vector<int32_t> & current, int idx) const
+  {
+    const int curr = buttonSafe(current, idx);
+    const int prev = buttonSafe(prev_buttons_, idx);
     return (curr == 1 && prev == 0);
+  }
+
+  double applyDeadzone(double value) const
+  {
+    if (std::abs(value) < deadzone_)
+    {
+      return 0.0;
+    }
+    return value;
   }
 
   void joyCallback(const sensor_msgs::msg::Joy::SharedPtr msg)
@@ -109,52 +145,343 @@ private:
     {
       prev_buttons_ = msg->buttons;
       has_prev_ = true;
-      return;
     }
 
     if (risingEdge(msg->buttons, button_gripper_open_))
     {
-      sendGripperGoal(gripper_open_width_);
+      if (!teleop_session_enabled_)
+      {
+        RCLCPP_WARN(this->get_logger(), "Ignoring gripper open: teleop session is not enabled.");
+      }
+      else
+      {
+        sendGripperGoal(gripper_open_width_);
+      }
     }
 
     if (risingEdge(msg->buttons, button_gripper_close_))
     {
-      sendGripperGoal(gripper_close_width_);
+      if (!teleop_session_enabled_)
+      {
+        RCLCPP_WARN(this->get_logger(), "Ignoring gripper close: teleop session is not enabled.");
+      }
+      else
+      {
+        sendGripperGoal(gripper_close_width_);
+      }
     }
 
-    // episode start stop
-    float val = msg->axes[axis_episode_];
-    if (val > 0.9) state = 1;
-    else if (val < -0.9) state = -1;
+    handleEpisodeAxis(msg);
 
-    if (state != prev_episode_state_) {
-      if (state == 1) {
-        std_msgs::msg::UInt8 m;
-        m.data = 1;
-        episode_pub_->publish(m);
+    if (risingEdge(msg->buttons, button_home_))
+    {
+      handleHomePressed();
+    }
+
+    handleTeleopAxis(msg);
+
+    handleTeleopTwist(msg);
+
+    prev_buttons_ = msg->buttons;
+  }
+
+  void handleEpisodeAxis(const sensor_msgs::msg::Joy::SharedPtr msg)
+  {
+    const float val = axisSafe(msg->axes, axis_episode_);
+
+    int state = 0;
+    if (val > 0.9f)
+    {
+      state = 1;
+    }
+    else if (val < -0.9f)
+    {
+      state = -1;
+    }
+
+    if (state != prev_episode_state_)
+    {
+      if (state == 1)
+      {
+        publishEpisodeCommand(1);
         RCLCPP_INFO(this->get_logger(), "Episode START");
       }
-      else if (state == -1) {
-        std_msgs::msg::UInt8 m;
-        m.data = 2;
-        episode_pub_->publish(m);
+      else if (state == -1)
+      {
+        publishEpisodeCommand(2);
         RCLCPP_INFO(this->get_logger(), "Episode STOP");
       }
     }
 
-prev_episode_state_ = state;
+    prev_episode_state_ = state;
+  }
 
-    if (risingEdge(msg->buttons, button_home_))
+  void handleTeleopAxis(const sensor_msgs::msg::Joy::SharedPtr msg)
+  {
+    const float val = axisSafe(msg->axes, axis_teleop_);
+
+    int state = 0;
+    if (val > 0.9f)
     {
-      sendHomeGoal();
+      state = 1;
+    }
+    else if (val < -0.9f)
+    {
+      state = -1;
     }
 
-    if (risingEdge(msg->buttons, button_haptic_start_))
+    if (state != prev_teleop_axis_state_)
     {
-      sendHapticGoal();
+      if (state == 1)
+      {
+        if (home_goal_in_progress_)
+        {
+          RCLCPP_WARN(this->get_logger(), "Cannot enable teleop while home goal is in progress.");
+        }
+        else if (pending_home_after_teleop_stop_)
+        {
+          RCLCPP_WARN(this->get_logger(), "Cannot enable teleop while waiting to start homing.");
+        }
+        else
+        {
+          enableTeleopSession();
+        }
+      }
+      else if (state == -1)
+      {
+        disableTeleopSession();
+      }
     }
 
-    prev_buttons_ = msg->buttons;
+    prev_teleop_axis_state_ = state;
+  }
+
+  void handleHomePressed()
+  {
+    if (home_goal_in_progress_)
+    {
+      RCLCPP_WARN(this->get_logger(), "Home goal already in progress.");
+      return;
+    }
+
+    if (pending_home_after_teleop_stop_)
+    {
+      RCLCPP_WARN(this->get_logger(), "Home goal is already queued until teleop stops.");
+      return;
+    }
+
+    if (teleop_session_enabled_ || teleop_goal_pending_ || teleop_goal_in_progress_ || teleop_goal_handle_)
+    {
+      RCLCPP_INFO(this->get_logger(), "Canceling teleop action before sending home goal...");
+      pending_home_after_teleop_stop_ = true;
+      disableTeleopSession();
+      return;
+    }
+
+    sendHomeGoalNow();
+  }
+
+  void enableTeleopSession()
+  {
+    if (teleop_goal_pending_ || teleop_goal_in_progress_)
+    {
+      RCLCPP_INFO(this->get_logger(), "Teleop action already active or pending.");
+      return;
+    }
+
+    if (!teleop_client_->wait_for_action_server(std::chrono::milliseconds(200)))
+    {
+      RCLCPP_WARN(this->get_logger(), "Teleop action server not available.");
+      return;
+    }
+
+    TeleopAction::Goal goal;
+    goal.mode = teleop_mode_;
+    goal.ee_name = teleop_ee_name_;
+    goal.move_orientation = teleop_move_orientation_;
+    goal.hapic_pos_multiplier = static_cast<float>(haptic_pos_multiplier_);
+    goal.hapic_ori_multiplier = static_cast<float>(haptic_ori_multiplier_);
+    goal.hapic_lin_vel_multiplier = static_cast<float>(haptic_lin_vel_multiplier_);
+    goal.hapic_ang_vel_multiplier = static_cast<float>(haptic_ang_vel_multiplier_);
+
+    rclcpp_action::Client<TeleopAction>::SendGoalOptions options;
+    options.goal_response_callback =
+        [this](const TeleopGoalHandle::SharedPtr & handle)
+    {
+      teleop_goal_pending_ = false;
+
+      if (!handle)
+      {
+        teleop_goal_handle_.reset();
+        teleop_goal_in_progress_ = false;
+        teleop_session_enabled_ = false;
+        RCLCPP_WARN(this->get_logger(), "Teleop action goal rejected.");
+
+        if (pending_home_after_teleop_stop_)
+        {
+          pending_home_after_teleop_stop_ = false;
+          sendHomeGoalNow();
+        }
+        return;
+      }
+
+      teleop_goal_handle_ = handle;
+      teleop_goal_in_progress_ = true;
+
+      if (teleop_cancel_requested_)
+      {
+        requestCancelTeleopGoal();
+        return;
+      }
+
+      teleop_session_enabled_ = true;
+      publishZeroTwist();
+      RCLCPP_INFO(this->get_logger(), "Teleop session enabled.");
+    };
+
+    options.result_callback =
+        [this](const TeleopGoalHandle::WrappedResult & result)
+    {
+      const bool start_home_after_stop = pending_home_after_teleop_stop_;
+
+      teleop_goal_handle_.reset();
+      teleop_goal_pending_ = false;
+      teleop_goal_in_progress_ = false;
+      teleop_cancel_requested_ = false;
+      teleop_cancel_in_progress_ = false;
+      teleop_session_enabled_ = false;
+      pending_home_after_teleop_stop_ = false;
+
+      publishZeroTwist();
+
+      switch (result.code)
+      {
+        case rclcpp_action::ResultCode::SUCCEEDED:
+          RCLCPP_INFO(this->get_logger(), "Teleop action completed.");
+          break;
+        case rclcpp_action::ResultCode::ABORTED:
+          RCLCPP_WARN(this->get_logger(), "Teleop action aborted.");
+          break;
+        case rclcpp_action::ResultCode::CANCELED:
+          RCLCPP_INFO(this->get_logger(), "Teleop action canceled.");
+          break;
+        default:
+          RCLCPP_WARN(this->get_logger(), "Unknown teleop action result code.");
+          break;
+      }
+
+      if (start_home_after_stop)
+      {
+        sendHomeGoalNow();
+      }
+    };
+
+    teleop_goal_pending_ = true;
+    teleop_cancel_requested_ = false;
+    teleop_client_->async_send_goal(goal, options);
+
+    RCLCPP_INFO(this->get_logger(), "Sending teleop action goal...");
+  }
+
+  void disableTeleopSession()
+  {
+    teleop_session_enabled_ = false;
+
+    publishZeroTwist();
+
+    if (teleop_goal_pending_ || teleop_goal_in_progress_ || teleop_goal_handle_)
+    {
+      teleop_cancel_requested_ = true;
+      requestCancelTeleopGoal();
+    }
+
+    RCLCPP_INFO(this->get_logger(), "Teleop session disabled.");
+  }
+
+  void requestCancelTeleopGoal()
+  {
+    if (teleop_cancel_in_progress_)
+    {
+      return;
+    }
+
+    if (teleop_goal_handle_)
+    {
+      teleop_cancel_in_progress_ = true;
+      teleop_client_->async_cancel_goal(
+          teleop_goal_handle_,
+          [this](auto future)
+          {
+            teleop_cancel_in_progress_ = false;
+            const auto cancel_response = future.get();
+            if (cancel_response->goals_canceling.empty())
+            {
+              RCLCPP_WARN(this->get_logger(), "Teleop action cancel request was not accepted.");
+            }
+            else
+            {
+              RCLCPP_INFO(this->get_logger(), "Teleop action cancel requested.");
+            }
+          });
+      return;
+    }
+
+    if (teleop_goal_pending_)
+    {
+      RCLCPP_INFO(this->get_logger(), "Teleop goal is pending; cancel will be requested after acceptance.");
+      return;
+    }
+
+    teleop_cancel_requested_ = false;
+    if (pending_home_after_teleop_stop_)
+    {
+      pending_home_after_teleop_stop_ = false;
+      sendHomeGoalNow();
+    }
+  }
+
+  void handleTeleopTwist(const sensor_msgs::msg::Joy::SharedPtr msg)
+  {
+    if (!teleop_session_enabled_)
+    {
+      return;
+    }
+
+    // Moved from old teleop/action-server side:
+    // map joystick axes -> Cartesian linear velocity
+    const double lx = applyDeadzone(axisSafe(msg->axes, left_stick_x_idx_));
+    const double ly = applyDeadzone(axisSafe(msg->axes, left_stick_y_idx_));
+    const double ry = applyDeadzone(axisSafe(msg->axes, right_stick_y_idx_));
+
+    // This sign convention may need one final flip depending on your robot frame.
+    // But structurally this is the right place for the mapping now.
+    geometry_msgs::msg::TwistStamped twist_msg;
+    twist_msg.header.stamp = this->now();
+    twist_msg.header.frame_id = twist_frame_id_;
+
+    twist_msg.twist.linear.x = (ly) * max_vx_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+    twist_msg.twist.linear.y = (lx) * max_vy_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+    twist_msg.twist.linear.z = (ry) * max_vz_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+
+    twist_msg.twist.angular.x = 0.0;
+    twist_msg.twist.angular.y = 0.0;
+    twist_msg.twist.angular.z = 0.0;
+
+    twist_pub_->publish(twist_msg);
+  }
+
+  void publishZeroTwist()
+  {
+    geometry_msgs::msg::TwistStamped twist_msg;
+    twist_msg.header.stamp = this->now();
+    twist_msg.header.frame_id = twist_frame_id_;
+    twist_msg.twist.linear.x = 0.0;
+    twist_msg.twist.linear.y = 0.0;
+    twist_msg.twist.linear.z = 0.0;
+    twist_msg.twist.angular.x = 0.0;
+    twist_msg.twist.angular.y = 0.0;
+    twist_msg.twist.angular.z = 0.0;
+    twist_pub_->publish(twist_msg);
   }
 
   void publishEpisodeCommand(uint8_t value)
@@ -163,91 +490,6 @@ prev_episode_state_ = state;
     msg.data = value;
     episode_pub_->publish(msg);
     RCLCPP_INFO(this->get_logger(), "Published episode command: %u", value);
-  }
-
-  void sendHapticGoal()
-  {
-    if (!haptic_client_->wait_for_action_server(std::chrono::milliseconds(200)))
-    {
-      RCLCPP_WARN(this->get_logger(), "Haptic action server not available.");
-      return;
-    }
-
-    if (haptic_active_)
-    {
-      RCLCPP_WARN(this->get_logger(), "Haptic action already active.");
-      return;
-    }
-
-    HapticAction::Goal goal;
-    goal.mode = 0;
-    goal.ee_name = "right_fr3_hand_tcp";
-    goal.move_orientation = false;
-    goal.hapic_pos_multiplier = 2.0;
-    goal.hapic_ori_multiplier = 1.0;
-    goal.hapic_lin_vel_multiplier = 1.0;
-    goal.hapic_ang_vel_multiplier = 1.0;
-
-    rclcpp_action::Client<HapticAction>::SendGoalOptions options;
-
-    options.goal_response_callback =
-        [this](const HapticGoalHandle::SharedPtr &handle)
-    {
-      if (!handle)
-      {
-        RCLCPP_WARN(this->get_logger(), "Haptic goal rejected.");
-        haptic_active_ = false;
-        haptic_goal_handle_.reset();
-      }
-      else
-      {
-        RCLCPP_INFO(this->get_logger(), "Haptic goal accepted.");
-        haptic_goal_handle_ = handle;
-        haptic_active_ = true;
-      }
-    };
-
-    options.result_callback =
-        [this](const HapticGoalHandle::WrappedResult &result)
-    {
-      switch (result.code)
-      {
-      case rclcpp_action::ResultCode::SUCCEEDED:
-        RCLCPP_INFO(this->get_logger(), "Haptic goal succeeded.");
-        break;
-      case rclcpp_action::ResultCode::ABORTED:
-        RCLCPP_WARN(this->get_logger(), "Haptic goal aborted.");
-        break;
-      case rclcpp_action::ResultCode::CANCELED:
-        RCLCPP_WARN(this->get_logger(), "Haptic goal canceled.");
-        break;
-      default:
-        RCLCPP_WARN(this->get_logger(), "Unknown haptic result code.");
-        break;
-      }
-
-      haptic_active_ = false;
-      haptic_goal_handle_.reset();
-
-      if (home_pending_)
-      {
-        RCLCPP_INFO(this->get_logger(), "Haptic finished, scheduling delayed home goal...");
-        home_pending_ = false;
-
-        delayed_home_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(200),
-            [this]()
-            {
-              if (delayed_home_timer_) {
-                delayed_home_timer_->cancel();
-                delayed_home_timer_.reset();
-              }
-              sendHomeGoalNow();
-            });
-      }
-    };
-
-    haptic_client_->async_send_goal(goal, options);
   }
 
   void sendGripperGoal(double width)
@@ -264,7 +506,7 @@ prev_episode_state_ = state;
 
     rclcpp_action::Client<GripperMove>::SendGoalOptions options;
     options.goal_response_callback =
-        [this, width](const GripperMoveGoalHandle::SharedPtr &handle)
+        [this, width](const GripperMoveGoalHandle::SharedPtr & handle)
     {
       if (!handle)
       {
@@ -277,39 +519,26 @@ prev_episode_state_ = state;
     };
 
     options.result_callback =
-        [this](const GripperMoveGoalHandle::WrappedResult &result)
+        [this](const GripperMoveGoalHandle::WrappedResult & result)
     {
       switch (result.code)
       {
-      case rclcpp_action::ResultCode::SUCCEEDED:
-        RCLCPP_INFO(this->get_logger(), "Gripper goal succeeded.");
-        break;
-      case rclcpp_action::ResultCode::ABORTED:
-        RCLCPP_WARN(this->get_logger(), "Gripper goal aborted.");
-        break;
-      case rclcpp_action::ResultCode::CANCELED:
-        RCLCPP_WARN(this->get_logger(), "Gripper goal canceled.");
-        break;
-      default:
-        RCLCPP_WARN(this->get_logger(), "Unknown gripper result code.");
-        break;
+        case rclcpp_action::ResultCode::SUCCEEDED:
+          RCLCPP_INFO(this->get_logger(), "Gripper goal succeeded.");
+          break;
+        case rclcpp_action::ResultCode::ABORTED:
+          RCLCPP_WARN(this->get_logger(), "Gripper goal aborted.");
+          break;
+        case rclcpp_action::ResultCode::CANCELED:
+          RCLCPP_WARN(this->get_logger(), "Gripper goal canceled.");
+          break;
+        default:
+          RCLCPP_WARN(this->get_logger(), "Unknown gripper result code.");
+          break;
       }
     };
 
     gripper_client_->async_send_goal(goal, options);
-  }
-
-  void sendHomeGoal()
-  {
-    if (haptic_active_ && haptic_goal_handle_)
-    {
-      RCLCPP_INFO(this->get_logger(), "Cancelling haptic goal before homing...");
-      home_pending_ = true;
-      haptic_client_->async_cancel_goal(haptic_goal_handle_);
-      return;
-    }
-
-    sendHomeGoalNow();
   }
 
   void sendHomeGoalNow()
@@ -326,6 +555,8 @@ prev_episode_state_ = state;
       return;
     }
 
+    home_goal_in_progress_ = true;
+
     HomeAction::Goal goal;
     goal.joint_names = home_joint_names_;
     goal.target_positions = home_joint_positions_;
@@ -335,10 +566,11 @@ prev_episode_state_ = state;
     rclcpp_action::Client<HomeAction>::SendGoalOptions options;
 
     options.goal_response_callback =
-        [this](const HomeGoalHandle::SharedPtr &handle)
+        [this](const HomeGoalHandle::SharedPtr & handle)
     {
       if (!handle)
       {
+        home_goal_in_progress_ = false;
         RCLCPP_WARN(this->get_logger(), "Home goal rejected.");
       }
       else
@@ -348,40 +580,62 @@ prev_episode_state_ = state;
     };
 
     options.result_callback =
-        [this](const HomeGoalHandle::WrappedResult &result)
+        [this](const HomeGoalHandle::WrappedResult & result)
     {
+      home_goal_in_progress_ = false;
       switch (result.code)
       {
-      case rclcpp_action::ResultCode::SUCCEEDED:
-        RCLCPP_INFO(this->get_logger(), "Home goal succeeded.");
-        break;
-      case rclcpp_action::ResultCode::ABORTED:
-        RCLCPP_WARN(this->get_logger(), "Home goal aborted.");
-        break;
-      case rclcpp_action::ResultCode::CANCELED:
-        RCLCPP_WARN(this->get_logger(), "Home goal canceled.");
-        break;
-      default:
-        RCLCPP_WARN(this->get_logger(), "Unknown home result code.");
-        break;
+        case rclcpp_action::ResultCode::SUCCEEDED:
+          RCLCPP_INFO(this->get_logger(), "Home goal succeeded.");
+          break;
+        case rclcpp_action::ResultCode::ABORTED:
+          RCLCPP_WARN(this->get_logger(), "Home goal aborted.");
+          break;
+        case rclcpp_action::ResultCode::CANCELED:
+          RCLCPP_WARN(this->get_logger(), "Home goal canceled.");
+          break;
+        default:
+          RCLCPP_WARN(this->get_logger(), "Unknown home result code.");
+          break;
       }
     };
+
     RCLCPP_INFO(this->get_logger(), "Sending home goal now...");
     home_client_->async_send_goal(goal, options);
   }
 
   int button_gripper_open_;
   int button_gripper_close_;
-  int axis_episode_;  
-  int button_haptic_start_;
-  int prev_episode_state_{0};  // -1, 0, +1
-  int state = 0;
+  int axis_episode_;
+  int axis_teleop_;
   int button_home_;
+
+  int left_stick_x_idx_;
+  int left_stick_y_idx_;
+  int right_stick_y_idx_;
+
+  int prev_episode_state_{0};
+  int prev_teleop_axis_state_{0};
+
+  double deadzone_;
+  double max_vx_;
+  double max_vy_;
+  double max_vz_;
+  double haptic_pos_multiplier_;
+  double haptic_ori_multiplier_;
+  double haptic_lin_vel_multiplier_;
+  double haptic_ang_vel_multiplier_;
 
   double gripper_open_width_;
   double gripper_close_width_;
   double gripper_speed_;
 
+  std::string twist_topic_name_;
+  std::string twist_frame_id_;
+  std::string teleop_action_name_;
+  int teleop_mode_;
+  std::string teleop_ee_name_;
+  bool teleop_move_orientation_;
   std::string gripper_action_name_;
   std::string home_action_name_;
 
@@ -391,22 +645,25 @@ prev_episode_state_ = state;
   double home_acc_scale_;
 
   bool has_prev_{false};
-  std::vector<int32_t> prev_buttons_;
+  bool teleop_session_enabled_{false};
+  bool home_goal_in_progress_{false};
+  bool teleop_goal_pending_{false};
+  bool teleop_goal_in_progress_{false};
+  bool teleop_cancel_requested_{false};
+  bool teleop_cancel_in_progress_{false};
+  bool pending_home_after_teleop_stop_{false};
 
-  std::string haptic_action_name_;
-  rclcpp_action::Client<HapticAction>::SharedPtr haptic_client_;
+  std::vector<int32_t> prev_buttons_;
 
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr episode_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_pub_;
 
   rclcpp_action::Client<GripperMove>::SharedPtr gripper_client_;
+  rclcpp_action::Client<TeleopAction>::SharedPtr teleop_client_;
+  TeleopGoalHandle::SharedPtr teleop_goal_handle_;
   rclcpp_action::Client<HomeAction>::SharedPtr home_client_;
 
-  HapticGoalHandle::SharedPtr haptic_goal_handle_;
-  bool haptic_active_{false};
-  bool home_pending_{false};
-
-  rclcpp::TimerBase::SharedPtr delayed_home_timer_;
 };
 
 int main(int argc, char **argv)
