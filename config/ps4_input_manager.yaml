@@ -30,9 +30,8 @@ ps4_input_manager:
 
     gripper_open_width: 0.080
     gripper_close_width: 0.06
-    gripper_speed: 0.05
+    gripper_command_topic: "/teleop/gripper_cmd"
 
-    gripper_action_name: "/right_franka_gripper/move"
     home_action_name: "/fr3_move_to_joint"
 
     home_joint_names:
@@ -55,3 +54,9 @@ ps4_input_manager:
 
     home_vel_scale: 0.1
     home_acc_scale: 0.1
+
+gripper_manager:
+  ros__parameters:
+    gripper_command_topic: "/teleop/gripper_cmd"
+    gripper_action_name: "/right_franka_gripper/move"
+    gripper_speed: 0.05

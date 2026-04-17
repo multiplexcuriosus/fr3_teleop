@@ -16,15 +16,6 @@ find_package(rclcpp_action REQUIRED)
 find_package(franka_msgs REQUIRED)
 find_package(fr3_husky_msgs REQUIRED)
 
-add_executable(simple_ps4_teleop_server src/simple_ps4_teleop_server.cpp)
-ament_target_dependencies(simple_ps4_teleop_server
-  rclcpp
-  sensor_msgs
-  geometry_msgs
-  std_msgs
-  std_srvs
-)
-
 add_executable(ps4_input_manager src/ps4_input_manager.cpp)
 ament_target_dependencies(ps4_input_manager
   rclcpp
@@ -36,8 +27,17 @@ ament_target_dependencies(ps4_input_manager
   fr3_husky_msgs
 )
 
+add_executable(gripper_manager src/gripper_manager.cpp)
+ament_target_dependencies(gripper_manager
+  rclcpp
+  std_msgs
+  rclcpp_action
+  franka_msgs
+)
+
 install(TARGETS
   ps4_input_manager
+  gripper_manager
   DESTINATION lib/${PROJECT_NAME}
 )
 

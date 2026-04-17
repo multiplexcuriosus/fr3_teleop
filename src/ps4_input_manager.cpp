@@ -8,20 +8,17 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joy.hpp"
+#include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/u_int8.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 
-#include "franka_msgs/action/move.hpp"
 #include "fr3_husky_msgs/action/omega_haptic.hpp"
 #include "fr3_husky_msgs/action/move_to_joint.hpp"
 
 class Ps4InputManager : public rclcpp::Node
 {
 public:
-  using GripperMove = franka_msgs::action::Move;
-  using GripperMoveGoalHandle = rclcpp_action::ClientGoalHandle<GripperMove>;
-
   using TeleopAction = fr3_husky_msgs::action::OmegaHaptic;
   using TeleopGoalHandle = rclcpp_action::ClientGoalHandle<TeleopAction>;
 
@@ -54,6 +51,7 @@ public:
 
     twist_topic_name_ = this->declare_parameter<std::string>("twist_topic_name", "/cartesian_cmd/twist");
     twist_frame_id_ = this->declare_parameter<std::string>("twist_frame_id", "base_link");
+    gripper_command_topic_ = this->declare_parameter<std::string>("gripper_command_topic", "/teleop/gripper_cmd");
     teleop_control_topic_ = this->declare_parameter<std::string>("teleop_control_topic", "/teleop/control");
     teleop_action_name_ = this->declare_parameter<std::string>("teleop_action_name", "/cartesian_executor");
     teleop_mode_ = this->declare_parameter<int>("teleop_mode", 0);
@@ -63,11 +61,8 @@ public:
     // Gripper preset widths
     gripper_open_width_ = this->declare_parameter<double>("gripper_open_width", 0.080);
     gripper_close_width_ = this->declare_parameter<double>("gripper_close_width", 0.06);
-    gripper_speed_ = this->declare_parameter<double>("gripper_speed", 0.05);
 
     // Action names
-    gripper_action_name_ = this->declare_parameter<std::string>(
-        "gripper_action_name", "/right_franka_gripper/move");
     home_action_name_ = this->declare_parameter<std::string>(
         "home_action_name", "/fr3_move_to_joint");
 
@@ -92,18 +87,19 @@ public:
 
     episode_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/episode/control", 10);
     teleop_pub_ = this->create_publisher<std_msgs::msg::UInt8>(teleop_control_topic_, 10);
+    gripper_cmd_pub_ = this->create_publisher<std_msgs::msg::Float64>(gripper_command_topic_, 10);
     twist_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(twist_topic_name_, 10);
 
     joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
         "/joy", 10,
         std::bind(&Ps4InputManager::joyCallback, this, std::placeholders::_1));
 
-    gripper_client_ = rclcpp_action::create_client<GripperMove>(this, gripper_action_name_);
     teleop_client_ = rclcpp_action::create_client<TeleopAction>(this, teleop_action_name_);
     home_client_ = rclcpp_action::create_client<HomeAction>(this, home_action_name_);
 
     RCLCPP_INFO(this->get_logger(), "PS4 input manager started.");
     RCLCPP_INFO(this->get_logger(), "Teleop control topic: %s", teleop_control_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Gripper command topic: %s", gripper_command_topic_.c_str());
   }
 
 private:
@@ -157,7 +153,7 @@ private:
       }
       else
       {
-        sendGripperGoal(gripper_open_width_);
+        publishGripperCommand(gripper_open_width_);
       }
     }
 
@@ -169,7 +165,7 @@ private:
       }
       else
       {
-        sendGripperGoal(gripper_close_width_);
+        publishGripperCommand(gripper_close_width_);
       }
     }
 
@@ -513,53 +509,12 @@ private:
     RCLCPP_INFO(this->get_logger(), "Published teleop command: %u", value);
   }
 
-  void sendGripperGoal(double width)
+  void publishGripperCommand(double width)
   {
-    if (!gripper_client_->wait_for_action_server(std::chrono::milliseconds(200)))
-    {
-      RCLCPP_WARN(this->get_logger(), "Gripper action server not available.");
-      return;
-    }
-
-    GripperMove::Goal goal;
-    goal.width = width;
-    goal.speed = gripper_speed_;
-
-    rclcpp_action::Client<GripperMove>::SendGoalOptions options;
-    options.goal_response_callback =
-        [this, width](const GripperMoveGoalHandle::SharedPtr & handle)
-    {
-      if (!handle)
-      {
-        RCLCPP_WARN(this->get_logger(), "Gripper goal rejected.");
-      }
-      else
-      {
-        RCLCPP_INFO(this->get_logger(), "Gripper goal accepted: width=%.3f", width);
-      }
-    };
-
-    options.result_callback =
-        [this](const GripperMoveGoalHandle::WrappedResult & result)
-    {
-      switch (result.code)
-      {
-        case rclcpp_action::ResultCode::SUCCEEDED:
-          RCLCPP_INFO(this->get_logger(), "Gripper goal succeeded.");
-          break;
-        case rclcpp_action::ResultCode::ABORTED:
-          RCLCPP_WARN(this->get_logger(), "Gripper goal aborted.");
-          break;
-        case rclcpp_action::ResultCode::CANCELED:
-          RCLCPP_WARN(this->get_logger(), "Gripper goal canceled.");
-          break;
-        default:
-          RCLCPP_WARN(this->get_logger(), "Unknown gripper result code.");
-          break;
-      }
-    };
-
-    gripper_client_->async_send_goal(goal, options);
+    std_msgs::msg::Float64 msg;
+    msg.data = width;
+    gripper_cmd_pub_->publish(msg);
+    RCLCPP_INFO(this->get_logger(), "Published gripper command width: %.3f", width);
   }
 
   void sendHomeGoalNow()
@@ -649,8 +604,8 @@ private:
 
   double gripper_open_width_;
   double gripper_close_width_;
-  double gripper_speed_;
 
+  std::string gripper_command_topic_;
   std::string twist_topic_name_;
   std::string twist_frame_id_;
   std::string teleop_control_topic_;
@@ -658,7 +613,6 @@ private:
   int teleop_mode_;
   std::string teleop_ee_name_;
   bool teleop_move_orientation_;
-  std::string gripper_action_name_;
   std::string home_action_name_;
 
   std::vector<std::string> home_joint_names_;
@@ -680,9 +634,9 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr episode_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr teleop_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr gripper_cmd_pub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_pub_;
 
-  rclcpp_action::Client<GripperMove>::SharedPtr gripper_client_;
   rclcpp_action::Client<TeleopAction>::SharedPtr teleop_client_;
   TeleopGoalHandle::SharedPtr teleop_goal_handle_;
   rclcpp_action::Client<HomeAction>::SharedPtr home_client_;

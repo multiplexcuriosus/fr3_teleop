@@ -28,5 +28,12 @@ def generate_launch_description():
             output="screen",
             parameters=[ps4_params],
         ),
+        Node(
+            package="fr3_teleop",
+            executable="gripper_manager",
+            name="gripper_manager",
+            output="screen",
+            parameters=[ps4_params],
+        ),
         dashboard_process,
     ])
