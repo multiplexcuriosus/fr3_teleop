@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <stdexcept>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joy.hpp"
@@ -53,6 +54,7 @@ public:
 
     twist_topic_name_ = this->declare_parameter<std::string>("twist_topic_name", "/cartesian_cmd/twist");
     twist_frame_id_ = this->declare_parameter<std::string>("twist_frame_id", "base_link");
+    teleop_control_topic_ = this->declare_parameter<std::string>("teleop_control_topic", "/teleop/control");
     teleop_action_name_ = this->declare_parameter<std::string>("teleop_action_name", "/cartesian_executor");
     teleop_mode_ = this->declare_parameter<int>("teleop_mode", 0);
     teleop_ee_name_ = this->declare_parameter<std::string>("teleop_ee_name", "right_fr3_hand_tcp");
@@ -77,20 +79,19 @@ public:
 
     home_joint_positions_ = this->declare_parameter<std::vector<double>>(
         "home_joint_positions",
-        {
-          0.4,
-          -0.785,
-          0.0,
-          -2.356,
-          0.0,
-          1.571,
-          0.785
-        });
+        std::vector<double>{});
+
+    if (home_joint_positions_.empty())
+    {
+      RCLCPP_FATAL(this->get_logger(), "Parameter 'home_joint_positions' must be provided via config.");
+      throw std::runtime_error("Missing required parameter: home_joint_positions");
+    }
 
     home_vel_scale_ = this->declare_parameter<double>("home_vel_scale", 0.1);
     home_acc_scale_ = this->declare_parameter<double>("home_acc_scale", 0.1);
 
     episode_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/episode/control", 10);
+    teleop_pub_ = this->create_publisher<std_msgs::msg::UInt8>(teleop_control_topic_, 10);
     twist_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(twist_topic_name_, 10);
 
     joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
@@ -98,10 +99,11 @@ public:
         std::bind(&Ps4InputManager::joyCallback, this, std::placeholders::_1));
 
     gripper_client_ = rclcpp_action::create_client<GripperMove>(this, gripper_action_name_);
-  teleop_client_ = rclcpp_action::create_client<TeleopAction>(this, teleop_action_name_);
+    teleop_client_ = rclcpp_action::create_client<TeleopAction>(this, teleop_action_name_);
     home_client_ = rclcpp_action::create_client<HomeAction>(this, home_action_name_);
 
     RCLCPP_INFO(this->get_logger(), "PS4 input manager started.");
+    RCLCPP_INFO(this->get_logger(), "Teleop control topic: %s", teleop_control_topic_.c_str());
   }
 
 private:
@@ -315,6 +317,7 @@ private:
         teleop_goal_handle_.reset();
         teleop_goal_in_progress_ = false;
         teleop_session_enabled_ = false;
+        publishTeleopCommand(2);
         RCLCPP_WARN(this->get_logger(), "Teleop action goal rejected.");
 
         if (pending_home_after_teleop_stop_)
@@ -335,6 +338,7 @@ private:
       }
 
       teleop_session_enabled_ = true;
+      publishTeleopCommand(1);
       publishZeroTwist();
       RCLCPP_INFO(this->get_logger(), "Teleop session enabled.");
     };
@@ -352,6 +356,7 @@ private:
       teleop_session_enabled_ = false;
       pending_home_after_teleop_stop_ = false;
 
+      publishTeleopCommand(2);
       publishZeroTwist();
 
       switch (result.code)
@@ -385,7 +390,15 @@ private:
 
   void disableTeleopSession()
   {
+    const bool teleop_was_active = teleop_session_enabled_ || teleop_goal_pending_ ||
+      teleop_goal_in_progress_ || static_cast<bool>(teleop_goal_handle_);
+
     teleop_session_enabled_ = false;
+
+    if (teleop_was_active)
+    {
+      publishTeleopCommand(2);
+    }
 
     publishZeroTwist();
 
@@ -460,8 +473,8 @@ private:
     twist_msg.header.frame_id = twist_frame_id_;
 
     twist_msg.twist.linear.x = (ly) * max_vx_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
-    twist_msg.twist.linear.y = (lx) * max_vy_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
-    twist_msg.twist.linear.z = (ry) * max_vz_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+    twist_msg.twist.linear.y = (-lx) * max_vy_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+    twist_msg.twist.linear.z = (-ry) * max_vz_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
 
     twist_msg.twist.angular.x = 0.0;
     twist_msg.twist.angular.y = 0.0;
@@ -490,6 +503,14 @@ private:
     msg.data = value;
     episode_pub_->publish(msg);
     RCLCPP_INFO(this->get_logger(), "Published episode command: %u", value);
+  }
+
+  void publishTeleopCommand(uint8_t value)
+  {
+    std_msgs::msg::UInt8 msg;
+    msg.data = value;
+    teleop_pub_->publish(msg);
+    RCLCPP_INFO(this->get_logger(), "Published teleop command: %u", value);
   }
 
   void sendGripperGoal(double width)
@@ -632,6 +653,7 @@ private:
 
   std::string twist_topic_name_;
   std::string twist_frame_id_;
+  std::string teleop_control_topic_;
   std::string teleop_action_name_;
   int teleop_mode_;
   std::string teleop_ee_name_;
@@ -657,6 +679,7 @@ private:
 
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr episode_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr teleop_pub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_pub_;
 
   rclcpp_action::Client<GripperMove>::SharedPtr gripper_client_;

@@ -1,0 +1,57 @@
+ps4_input_manager:
+  ros__parameters:
+    button_gripper_open: 2
+    button_gripper_close: 0
+    axis_episode: 6
+    button_home: 1
+    axis_teleop: 7
+
+    left_stick_x_idx: 0
+    left_stick_y_idx: 1
+    right_stick_y_idx: 4
+
+    deadzone: 0.08
+    max_vx: 0.08
+    max_vy: 0.08
+    max_vz: 0.05
+
+    haptic_pos_multiplier: 2.0
+    haptic_lin_vel_multiplier: 1.0
+    haptic_ori_multiplier: 1.0
+    haptic_ang_vel_multiplier: 1.0
+
+    twist_topic_name: "/cartesian_cmd/twist"
+    twist_frame_id: "base_link"
+    teleop_control_topic: "/teleop/control"
+    teleop_action_name: "/cartesian_executor"
+    teleop_mode: 0
+    teleop_ee_name: "right_fr3_hand_tcp"
+    teleop_move_orientation: false
+
+    gripper_open_width: 0.080
+    gripper_close_width: 0.06
+    gripper_speed: 0.05
+
+    gripper_action_name: "/right_franka_gripper/move"
+    home_action_name: "/fr3_move_to_joint"
+
+    home_joint_names:
+      - right_fr3_joint1
+      - right_fr3_joint2
+      - right_fr3_joint3
+      - right_fr3_joint4
+      - right_fr3_joint5
+      - right_fr3_joint6
+      - right_fr3_joint7
+
+    home_joint_positions:
+      - 0.5235988
+      - -0.785
+      - 0.0
+      - -2.356
+      - 0.0
+      - 1.571
+      - 0.785
+
+    home_vel_scale: 0.1
+    home_acc_scale: 0.1

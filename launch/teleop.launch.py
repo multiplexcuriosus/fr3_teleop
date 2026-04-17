@@ -1,7 +1,19 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch.actions import ExecuteProcess
+from ament_index_python.packages import get_package_share_directory
+import os
 
 def generate_launch_description():
+    pkg_share = get_package_share_directory("fr3_teleop")
+    ps4_params = os.path.join(pkg_share, "config", "ps4_input_manager.yaml")
+    dashboard_script = "/home/jau/dyros/src/fr3_teleop/dashboard.py"
+
+    dashboard_process = ExecuteProcess(
+        cmd=["python3", dashboard_script],
+        output="screen",
+    )
+
     return LaunchDescription([
         Node(
             package="joy",
@@ -14,17 +26,7 @@ def generate_launch_description():
             executable="ps4_input_manager",
             name="ps4_input_manager",
             output="screen",
-            parameters=[{
-                "button_gripper_open": 2,
-                "button_gripper_close": 0,
-                "button_episode_start": 9,
-                "button_episode_stop": 8,
-                "button_home": 1,
-                "gripper_action_name": "/right_franka_gripper/move",
-                "home_action_name": "/fr3_move_to_joint",
-                "gripper_open_width": 0.080,
-                "gripper_close_width": 0.06,
-                "gripper_speed": 0.05,
-            }],
+            parameters=[ps4_params],
         ),
+        dashboard_process,
     ])
