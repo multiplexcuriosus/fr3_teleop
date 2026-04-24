@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUT_DIR="data/bags"
+PREFIX="mobile_base"
+
+LATEST=$(ls -dt "${OUT_DIR}/${PREFIX}_"* 2>/dev/null | head -n 1 || true)
+
+if [ -z "$LATEST" ]; then
+  echo "No bag found for prefix '$PREFIX' in '$OUT_DIR'"
+  exit 1
+fi
+
+echo "Deleting latest bag: $LATEST"
+rm -rf "$LATEST"
+echo "Done."

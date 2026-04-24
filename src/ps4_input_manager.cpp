@@ -287,7 +287,18 @@ private:
       return;
     }
 
-    if (!teleop_client_->wait_for_action_server(std::chrono::milliseconds(200)))
+    bool available = false;
+    for (int i = 0; i < 5; ++i)
+    {
+      if (teleop_client_->wait_for_action_server(std::chrono::milliseconds(500)))
+      {
+        available = true;
+        break;
+      }
+      RCLCPP_WARN(this->get_logger(), "Waiting for teleop action server... (%d/5)", i + 1);
+    }
+
+    if (!available)
     {
       RCLCPP_WARN(this->get_logger(), "Teleop action server not available.");
       return;

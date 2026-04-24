@@ -1,6 +1,9 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.actions import ExecuteProcess
+from launch.actions import ExecuteProcess, IncludeLaunchDescription, DeclareLaunchArgument
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.conditions import IfCondition, UnlessCondition
+from launch.substitutions import LaunchConfiguration
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -8,6 +11,19 @@ def generate_launch_description():
     pkg_share = get_package_share_directory("fr3_teleop")
     ps4_params = os.path.join(pkg_share, "config", "ps4_input_manager.yaml")
     dashboard_script = "/home/jau/dyros/src/fr3_teleop/dashboard.py"
+    
+    # Get the camera launch file path
+    openmv_pkg_share = get_package_share_directory("openmv_cam")
+    camera_launch_file = os.path.join(openmv_pkg_share, "launch", "both_cams.launch.py")
+
+    # Declare launch argument
+    no_cams_arg = DeclareLaunchArgument(
+        "no_cams",
+        default_value="false",
+        description="Disable camera launch"
+    )
+    
+    no_cams = LaunchConfiguration("no_cams")
 
     dashboard_process = ExecuteProcess(
         cmd=["python3", dashboard_script],
@@ -15,6 +31,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        no_cams_arg,
         Node(
             package="joy",
             executable="joy_node",
@@ -36,4 +53,8 @@ def generate_launch_description():
             parameters=[ps4_params],
         ),
         dashboard_process,
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(camera_launch_file),
+            condition=UnlessCondition(no_cams),
+        ),
     ])

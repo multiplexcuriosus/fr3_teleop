@@ -425,6 +425,7 @@ class TeleopDashboardNode(Node):
     def rgb_cb(self, msg: Image):
         try:
             img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            img = cv2.rotate(img, cv2.ROTATE_180)
             self.rgb_buffer.set(img, is_rgb=False)
         except Exception as e:
             self.get_logger().error(f"RGB callback failed: {e}")

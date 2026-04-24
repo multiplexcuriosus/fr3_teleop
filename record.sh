@@ -5,7 +5,7 @@ set -euo pipefail
 # Defaults
 # -----------------------------
 OUT_DIR="data/bags"
-PREFIX="real_il"
+PREFIX="mobile_base"
 
 # parse args like target_dir=... prefix=...
 for arg in "$@"; do
@@ -34,44 +34,46 @@ echo "Recording to: $BAG_PATH"
 mkdir -p "$OUT_DIR"
 
 # -----------------------------
+# Create helper delete script
+# -----------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DELETE_SCRIPT="${SCRIPT_DIR}/delete_latest_bag"
+
+cat <<EOF > "$DELETE_SCRIPT"
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUT_DIR="${OUT_DIR}"
+PREFIX="${PREFIX}"
+
+LATEST=\$(ls -dt "\${OUT_DIR}/\${PREFIX}_"* 2>/dev/null | head -n 1 || true)
+
+if [ -z "\$LATEST" ]; then
+  echo "No bag found for prefix '\$PREFIX' in '\$OUT_DIR'"
+  exit 1
+fi
+
+echo "Deleting latest bag: \$LATEST"
+rm -rf "\$LATEST"
+echo "Done."
+EOF
+
+chmod +x "$DELETE_SCRIPT"
+
+# -----------------------------
 # Topic selection
 # -----------------------------
-# Keep only topics that are actually relevant for imitation-learning data:
-# - episode start/stop control
-# - teleop command stream
-# - robot proprioception / state
-# - gripper state
-# - RGB image
-# - event image
-#
-# Excluded on purpose:
-# - RViz / MoveIt visualization topics
-# - tf / tf_static (usually unnecessary if calibration is fixed elsewhere)
-# - debug topics / transition_event
-# - compressed image variants
-# - haptic feedback-only topics unless you explicitly want raw operator device data
-#
 TOPICS=(
-  # Infra
   /episode/control 
   /camera/camera/color/camera_info
 
-  # Action
   /cartesian_cmd/twist
   /teleop/gripper_cmd
 
-  # Observation
   /camera/camera/color/image_raw
   /openmv_cam/image
 
-  # Proprioception
   /joint_states
-  /right_fr3/joint_states
-  /right_franka_gripper/joint_states
-
-  /right_franka_robot_state_broadcaster/current_pose
-  /right_franka_robot_state_broadcaster/measured_joint_states
-  /right_franka_robot_state_broadcaster/robot_state
 )
 
 # -----------------------------
