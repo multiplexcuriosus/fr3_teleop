@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -494,6 +495,10 @@ class TeleopDashboardNode(Node):
             elif cmd == self.teleop_stop_cmd:
                 self.state.teleop_enabled = False
 
+    def reset_episode_counter(self):
+        with self.state_lock:
+            self.state.successful_episodes = 0
+
     def get_state_snapshot(self) -> TeleopState:
         with self.state_lock:
             s = self.state
@@ -558,7 +563,27 @@ class TeleopDashboardWindow(QMainWindow):
         self.help_label.setAlignment(Qt.AlignCenter)
         self.help_label.setStyleSheet("color: white; font-size: 16px;")
 
+        self.reset_btn = QPushButton("Reset Episode Counter")
+        self.reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7a3800;
+                color: white;
+                font-size: 16px;
+                font-weight: 600;
+                border-radius: 8px;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #b35200;
+            }
+            QPushButton:pressed {
+                background-color: #4d2300;
+            }
+        """)
+        self.reset_btn.clicked.connect(self.node.reset_episode_counter)
+
         bottom_row.addWidget(self.help_label, 1)
+        bottom_row.addWidget(self.reset_btn)
 
         root.addLayout(top_row, 0)
         root.addLayout(image_row, 1)
