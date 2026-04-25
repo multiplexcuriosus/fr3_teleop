@@ -6,8 +6,9 @@ set -euo pipefail
 # -----------------------------
 OUT_DIR="data/bags"
 PREFIX="mobile_base"
+BAG_NAME=""
 
-# parse args like target_dir=... prefix=...
+# parse args like target_dir=... prefix=... name=...
 for arg in "$@"; do
   case "$arg" in
     target_dir=*)
@@ -16,9 +17,12 @@ for arg in "$@"; do
     prefix=*)
       PREFIX="${arg#*=}"
       ;;
+    name=*)
+      BAG_NAME="${arg#*=}"
+      ;;
     *)
       echo "Unknown argument: $arg"
-      echo "Usage: $0 [target_dir=PATH] [prefix=NAME]"
+      echo "Usage: $0 [target_dir=PATH] [prefix=NAME] [name=BAG_NAME]"
       exit 1
       ;;
   esac
@@ -27,8 +31,12 @@ done
 # -----------------------------
 # Output path
 # -----------------------------
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-BAG_PATH="${OUT_DIR}/${PREFIX}_${TIMESTAMP}"
+if [ -n "$BAG_NAME" ]; then
+  BAG_PATH="${OUT_DIR}/${BAG_NAME}"
+else
+  TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+  BAG_PATH="${OUT_DIR}/${PREFIX}_${TIMESTAMP}"
+fi
 
 echo "Recording to: $BAG_PATH"
 mkdir -p "$OUT_DIR"
