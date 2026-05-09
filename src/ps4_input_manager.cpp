@@ -3,13 +3,15 @@
 #include <vector>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <stdexcept>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joy.hpp"
-#include "std_msgs/msg/float64.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/u_int8.hpp"
+#include "std_msgs/msg/u_int32.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 
@@ -30,6 +32,7 @@ public:
     // Button mapping
     button_gripper_open_ = this->declare_parameter<int>("button_gripper_open", 2);    // triangle
     button_gripper_close_ = this->declare_parameter<int>("button_gripper_close", 0);  // cross
+    button_episode_cancel_ = this->declare_parameter<int>("button_episode_cancel", 6);  // TODO: set to L2 mapping
     axis_episode_ = this->declare_parameter<int>("axis_episode", 6);
     button_home_ = this->declare_parameter<int>("button_home", 1);                    // circle
     axis_teleop_ = this->declare_parameter<int>("axis_teleop", 7);
@@ -51,16 +54,13 @@ public:
 
     twist_topic_name_ = this->declare_parameter<std::string>("twist_topic_name", "/cartesian_cmd/twist");
     twist_frame_id_ = this->declare_parameter<std::string>("twist_frame_id", "base_link");
-    gripper_command_topic_ = this->declare_parameter<std::string>("gripper_command_topic", "/teleop/gripper_cmd");
+    gripper_state_command_topic_ = this->declare_parameter<std::string>(
+      "gripper_state_command_topic", "/teleop/gripper_state_cmd");
     teleop_control_topic_ = this->declare_parameter<std::string>("teleop_control_topic", "/teleop/control");
     teleop_action_name_ = this->declare_parameter<std::string>("teleop_action_name", "/cartesian_executor");
     teleop_mode_ = this->declare_parameter<int>("teleop_mode", 0);
     teleop_ee_name_ = this->declare_parameter<std::string>("teleop_ee_name", "right_fr3_hand_tcp");
     teleop_move_orientation_ = this->declare_parameter<bool>("teleop_move_orientation", false);
-
-    // Gripper preset widths
-    gripper_open_width_ = this->declare_parameter<double>("gripper_open_width", 0.080);
-    gripper_close_width_ = this->declare_parameter<double>("gripper_close_width", 0.06);
 
     // Action names
     home_action_name_ = this->declare_parameter<std::string>(
@@ -84,10 +84,13 @@ public:
 
     home_vel_scale_ = this->declare_parameter<double>("home_vel_scale", 0.1);
     home_acc_scale_ = this->declare_parameter<double>("home_acc_scale", 0.1);
+    delayed_home_delay_ms_ = this->declare_parameter<int>("delayed_home_delay_ms", 300);
 
     episode_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/episode/control", 10);
+    num_valid_episodes_pub_ = this->create_publisher<std_msgs::msg::UInt32>(
+      "/data_collection/num_valid_episodes", 10);
     teleop_pub_ = this->create_publisher<std_msgs::msg::UInt8>(teleop_control_topic_, 10);
-    gripper_cmd_pub_ = this->create_publisher<std_msgs::msg::Float64>(gripper_command_topic_, 10);
+    gripper_state_pub_ = this->create_publisher<std_msgs::msg::Bool>(gripper_state_command_topic_, 10);
     twist_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(twist_topic_name_, 10);
 
     joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
@@ -96,10 +99,15 @@ public:
 
     teleop_client_ = rclcpp_action::create_client<TeleopAction>(this, teleop_action_name_);
     home_client_ = rclcpp_action::create_client<HomeAction>(this, home_action_name_);
+    home_block_until_ = this->now();
 
     RCLCPP_INFO(this->get_logger(), "PS4 input manager started.");
+    RCLCPP_INFO(this->get_logger(), "Episode cancel button index: %d", button_episode_cancel_);
+    RCLCPP_INFO(this->get_logger(), "Valid episode count topic: /data_collection/num_valid_episodes");
     RCLCPP_INFO(this->get_logger(), "Teleop control topic: %s", teleop_control_topic_.c_str());
-    RCLCPP_INFO(this->get_logger(), "Gripper command topic: %s", gripper_command_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Gripper state command topic: %s", gripper_state_command_topic_.c_str());
+    publishNumValidEpisodes();
+    publishGripperStateCommand(current_gripper_closed_state_);
   }
 
 private:
@@ -153,7 +161,7 @@ private:
       }
       else
       {
-        publishGripperCommand(gripper_open_width_);
+        publishGripperStateCommand(false);
       }
     }
 
@@ -165,11 +173,38 @@ private:
       }
       else
       {
-        publishGripperCommand(gripper_close_width_);
+        publishGripperStateCommand(true);
       }
     }
 
-    handleEpisodeAxis(msg);
+    bool cancel_edge = false;
+    if (risingEdge(msg->buttons, button_episode_cancel_))
+    {
+      cancel_edge = true;
+      if (episode_recording_)
+      {
+        publishEpisodeCommand(3);
+        episode_recording_ = false;
+        RCLCPP_INFO(this->get_logger(), "[EPISODE] cancel_current requested");
+      }
+      else
+      {
+        publishEpisodeCommand(4);
+        if (num_valid_episodes_ > 0)
+        {
+          --num_valid_episodes_;
+        }
+        publishNumValidEpisodes();
+        episode_recording_ = false;
+        RCLCPP_INFO(this->get_logger(), "[EPISODE] cancel_last requested");
+      }
+    }
+
+    // If cancel was requested this cycle, do not emit start/stop in the same callback.
+    if (!cancel_edge)
+    {
+      handleEpisodeAxis(msg);
+    }
 
     if (risingEdge(msg->buttons, button_home_))
     {
@@ -202,12 +237,23 @@ private:
       if (state == 1)
       {
         publishEpisodeCommand(1);
+        episode_recording_ = true;
         RCLCPP_INFO(this->get_logger(), "Episode START");
       }
       else if (state == -1)
       {
-        publishEpisodeCommand(2);
-        RCLCPP_INFO(this->get_logger(), "Episode STOP");
+        if (episode_recording_)
+        {
+          publishEpisodeCommand(2);
+          episode_recording_ = false;
+          ++num_valid_episodes_;
+          publishNumValidEpisodes();
+          RCLCPP_INFO(this->get_logger(), "Episode STOP");
+        }
+        else
+        {
+          RCLCPP_WARN(this->get_logger(), "Ignoring episode stop: no active episode is recording.");
+        }
       }
     }
 
@@ -228,22 +274,18 @@ private:
       state = -1;
     }
 
+    if (pending_home_after_teleop_stop_)
+    {
+      // Keep the edge detector aligned with the current axis position while teleop enable is blocked.
+      prev_teleop_axis_state_ = state;
+      return;
+    }
+
     if (state != prev_teleop_axis_state_)
     {
       if (state == 1)
       {
-        if (home_goal_in_progress_)
-        {
-          RCLCPP_WARN(this->get_logger(), "Cannot enable teleop while home goal is in progress.");
-        }
-        else if (pending_home_after_teleop_stop_)
-        {
-          RCLCPP_WARN(this->get_logger(), "Cannot enable teleop while waiting to start homing.");
-        }
-        else
-        {
-          enableTeleopSession();
-        }
+        enableTeleopSession();
       }
       else if (state == -1)
       {
@@ -268,6 +310,10 @@ private:
       return;
     }
 
+    home_active_ = true;
+    home_block_until_ = this->now() + rclcpp::Duration::from_seconds(3.0);
+    RCLCPP_INFO(this->get_logger(), "Home motion started — teleop temporarily blocked");
+
     if (teleop_session_enabled_ || teleop_goal_pending_ || teleop_goal_in_progress_ || teleop_goal_handle_)
     {
       RCLCPP_INFO(this->get_logger(), "Canceling teleop action before sending home goal...");
@@ -276,11 +322,21 @@ private:
       return;
     }
 
+    stopDelayedHomeTimer();
     sendHomeGoalNow();
   }
 
   void enableTeleopSession()
   {
+    if (home_active_ || this->now() < home_block_until_)
+    {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "Ignoring teleop start while home trajectory is active");
+      RCLCPP_WARN(this->get_logger(), "Teleop start rejected because home is active");
+      return;
+    }
+
     if (teleop_goal_pending_ || teleop_goal_in_progress_)
     {
       RCLCPP_INFO(this->get_logger(), "Teleop action already active or pending.");
@@ -329,8 +385,8 @@ private:
 
         if (pending_home_after_teleop_stop_)
         {
-          pending_home_after_teleop_stop_ = false;
-          sendHomeGoalNow();
+          RCLCPP_INFO(this->get_logger(), "Teleop goal was not accepted; treating teleop as stopped.");
+          startDelayedHomeTimer();
         }
         return;
       }
@@ -361,7 +417,6 @@ private:
       teleop_cancel_requested_ = false;
       teleop_cancel_in_progress_ = false;
       teleop_session_enabled_ = false;
-      pending_home_after_teleop_stop_ = false;
 
       publishTeleopCommand(2);
       publishZeroTwist();
@@ -384,7 +439,8 @@ private:
 
       if (start_home_after_stop)
       {
-        sendHomeGoalNow();
+        RCLCPP_INFO(this->get_logger(), "Teleop fully canceled/stopped; scheduling delayed home goal.");
+        startDelayedHomeTimer();
       }
     };
 
@@ -428,6 +484,7 @@ private:
     if (teleop_goal_handle_)
     {
       teleop_cancel_in_progress_ = true;
+      RCLCPP_INFO(this->get_logger(), "Teleop cancel requested.");
       teleop_client_->async_cancel_goal(
           teleop_goal_handle_,
           [this](auto future)
@@ -455,9 +512,47 @@ private:
     teleop_cancel_requested_ = false;
     if (pending_home_after_teleop_stop_)
     {
-      pending_home_after_teleop_stop_ = false;
-      sendHomeGoalNow();
+      RCLCPP_INFO(this->get_logger(), "Teleop already stopped; scheduling delayed home goal.");
+      startDelayedHomeTimer();
     }
+  }
+
+  void stopDelayedHomeTimer()
+  {
+    if (delayed_home_timer_)
+    {
+      delayed_home_timer_->cancel();
+      delayed_home_timer_.reset();
+    }
+  }
+
+  void startDelayedHomeTimer()
+  {
+    stopDelayedHomeTimer();
+
+    const auto delay = std::chrono::milliseconds(delayed_home_delay_ms_);
+    RCLCPP_INFO(this->get_logger(), "Delayed home timer started (%d ms).", delayed_home_delay_ms_);
+    delayed_home_timer_ = this->create_wall_timer(
+      delay,
+      [this]()
+      {
+        if (delayed_home_timer_)
+        {
+          delayed_home_timer_->cancel();
+          delayed_home_timer_.reset();
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Delayed home timer fired.");
+
+        if (!pending_home_after_teleop_stop_)
+        {
+          RCLCPP_INFO(this->get_logger(), "Ignoring delayed home trigger: no pending home request.");
+          return;
+        }
+
+        pending_home_after_teleop_stop_ = false;
+        sendHomeGoalNow();
+      });
   }
 
   void handleTeleopTwist(const sensor_msgs::msg::Joy::SharedPtr msg)
@@ -512,6 +607,14 @@ private:
     RCLCPP_INFO(this->get_logger(), "Published episode command: %u", value);
   }
 
+  void publishNumValidEpisodes()
+  {
+    std_msgs::msg::UInt32 msg;
+    msg.data = num_valid_episodes_;
+    num_valid_episodes_pub_->publish(msg);
+    RCLCPP_INFO(this->get_logger(), "Published valid episode count: %u", num_valid_episodes_);
+  }
+
   void publishTeleopCommand(uint8_t value)
   {
     std_msgs::msg::UInt8 msg;
@@ -520,29 +623,37 @@ private:
     RCLCPP_INFO(this->get_logger(), "Published teleop command: %u", value);
   }
 
-  void publishGripperCommand(double width)
+  void publishGripperStateCommand(bool closed)
   {
-    std_msgs::msg::Float64 msg;
-    msg.data = width;
-    gripper_cmd_pub_->publish(msg);
-    RCLCPP_INFO(this->get_logger(), "Published gripper command width: %.3f", width);
+    std_msgs::msg::Bool msg;
+    msg.data = closed;
+    gripper_state_pub_->publish(msg);
+    current_gripper_closed_state_ = closed;
+    RCLCPP_INFO(this->get_logger(), "Published gripper state command: %s", closed ? "CLOSED" : "OPEN");
   }
 
   void sendHomeGoalNow()
   {
+    stopDelayedHomeTimer();
+
     if (!home_client_->wait_for_action_server(std::chrono::milliseconds(200)))
     {
+      home_active_ = false;
+      RCLCPP_INFO(this->get_logger(), "Home motion finished — teleop re-enabled");
       RCLCPP_WARN(this->get_logger(), "Home action server not available.");
       return;
     }
 
     if (home_joint_names_.size() != home_joint_positions_.size())
     {
+      home_active_ = false;
+      RCLCPP_INFO(this->get_logger(), "Home motion finished — teleop re-enabled");
       RCLCPP_ERROR(this->get_logger(), "Home joint name / position size mismatch.");
       return;
     }
 
     home_goal_in_progress_ = true;
+    prev_teleop_axis_state_ = 0;
 
     HomeAction::Goal goal;
     goal.joint_names = home_joint_names_;
@@ -557,7 +668,9 @@ private:
     {
       if (!handle)
       {
+        home_active_ = false;
         home_goal_in_progress_ = false;
+        RCLCPP_INFO(this->get_logger(), "Home motion finished — teleop re-enabled");
         RCLCPP_WARN(this->get_logger(), "Home goal rejected.");
       }
       else
@@ -569,6 +682,7 @@ private:
     options.result_callback =
         [this](const HomeGoalHandle::WrappedResult & result)
     {
+      home_active_ = false;
       home_goal_in_progress_ = false;
       switch (result.code)
       {
@@ -585,14 +699,26 @@ private:
           RCLCPP_WARN(this->get_logger(), "Unknown home result code.");
           break;
       }
+      RCLCPP_INFO(this->get_logger(), "Home motion finished — teleop re-enabled");
     };
 
-    RCLCPP_INFO(this->get_logger(), "Sending home goal now...");
-    home_client_->async_send_goal(goal, options);
+    RCLCPP_INFO(this->get_logger(), "Home goal sent.");
+    try
+    {
+      home_client_->async_send_goal(goal, options);
+    }
+    catch (const std::exception & e)
+    {
+      home_active_ = false;
+      home_goal_in_progress_ = false;
+      RCLCPP_INFO(this->get_logger(), "Home motion finished — teleop re-enabled");
+      RCLCPP_ERROR(this->get_logger(), "Failed to send home goal: %s", e.what());
+    }
   }
 
   int button_gripper_open_;
   int button_gripper_close_;
+  int button_episode_cancel_;
   int axis_episode_;
   int axis_teleop_;
   int button_home_;
@@ -613,10 +739,7 @@ private:
   double haptic_lin_vel_multiplier_;
   double haptic_ang_vel_multiplier_;
 
-  double gripper_open_width_;
-  double gripper_close_width_;
-
-  std::string gripper_command_topic_;
+  std::string gripper_state_command_topic_;
   std::string twist_topic_name_;
   std::string twist_frame_id_;
   std::string teleop_control_topic_;
@@ -630,27 +753,35 @@ private:
   std::vector<double> home_joint_positions_;
   double home_vel_scale_;
   double home_acc_scale_;
+  int delayed_home_delay_ms_;
 
   bool has_prev_{false};
   bool teleop_session_enabled_{false};
+  bool home_active_ = false;
   bool home_goal_in_progress_{false};
   bool teleop_goal_pending_{false};
   bool teleop_goal_in_progress_{false};
   bool teleop_cancel_requested_{false};
   bool teleop_cancel_in_progress_{false};
   bool pending_home_after_teleop_stop_{false};
+  bool current_gripper_closed_state_{false};
+  bool episode_recording_{false};
+  uint32_t num_valid_episodes_{0};
 
   std::vector<int32_t> prev_buttons_;
 
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr episode_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt32>::SharedPtr num_valid_episodes_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr teleop_pub_;
-  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr gripper_cmd_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_state_pub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_pub_;
 
   rclcpp_action::Client<TeleopAction>::SharedPtr teleop_client_;
   TeleopGoalHandle::SharedPtr teleop_goal_handle_;
   rclcpp_action::Client<HomeAction>::SharedPtr home_client_;
+  rclcpp::Time home_block_until_;
+  rclcpp::TimerBase::SharedPtr delayed_home_timer_;
 
 };
 
