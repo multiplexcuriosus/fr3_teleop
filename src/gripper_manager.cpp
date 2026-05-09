@@ -1,10 +1,12 @@
 #include <chrono>
 #include <cmath>
+#include <algorithm>
 #include <memory>
 #include <string>
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64.hpp"
 
 #include "franka_msgs/action/move.hpp"
@@ -17,75 +19,167 @@ public:
 
   GripperManager() : Node("gripper_manager")
   {
-    gripper_command_topic_ = this->declare_parameter<std::string>("gripper_command_topic", "/teleop/gripper_cmd");
+    gripper_state_command_topic_ = this->declare_parameter<std::string>(
+      "gripper_state_command_topic", "/teleop/gripper_state_cmd");
+    gripper_command_topic_ = this->declare_parameter<std::string>(
+      "gripper_command_topic", "/teleop/gripper_cmd");
     gripper_action_name_ = this->declare_parameter<std::string>("gripper_action_name", "/right_franka_gripper/move");
     gripper_speed_ = this->declare_parameter<double>("gripper_speed", 0.05);
     command_epsilon_ = this->declare_parameter<double>("gripper_command_epsilon", 1e-3);
+    gripper_open_width_ = this->declare_parameter<double>("gripper_open_width", 0.080);
+    gripper_close_width_ = this->declare_parameter<double>("gripper_close_width", 0.060);
+    min_command_interval_sec_ = this->declare_parameter<double>("min_command_interval_sec", 0.5);
 
-    gripper_sub_ = this->create_subscription<std_msgs::msg::Float64>(
+    gripper_state_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      gripper_state_command_topic_, 10,
+      std::bind(&GripperManager::gripperStateCallback, this, std::placeholders::_1));
+
+    deprecated_gripper_width_sub_ = this->create_subscription<std_msgs::msg::Float64>(
       gripper_command_topic_, 10,
-      std::bind(&GripperManager::gripperCommandCallback, this, std::placeholders::_1));
+      std::bind(&GripperManager::deprecatedGripperWidthCallback, this, std::placeholders::_1));
 
     gripper_client_ = rclcpp_action::create_client<GripperMove>(this, gripper_action_name_);
 
     RCLCPP_INFO(this->get_logger(), "Gripper manager started.");
-    RCLCPP_INFO(this->get_logger(), "Gripper command topic: %s", gripper_command_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Gripper state command topic: %s", gripper_state_command_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Deprecated width topic: %s", gripper_command_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "Gripper action name: %s", gripper_action_name_.c_str());
     RCLCPP_INFO(this->get_logger(), "Gripper speed: %.3f", gripper_speed_);
     RCLCPP_INFO(this->get_logger(), "Gripper command epsilon: %.6f", command_epsilon_);
+    RCLCPP_INFO(this->get_logger(), "Gripper widths: open=%.3f close=%.3f", gripper_open_width_, gripper_close_width_);
   }
 
 private:
-  void gripperCommandCallback(const std_msgs::msg::Float64::SharedPtr msg)
+  static double clampWidth(double width)
   {
-    const double requested_width = msg->data;
+    return std::clamp(width, 0.0, 0.08);
+  }
 
-    if (has_last_sent_width_ && std::abs(requested_width - last_sent_width_) <= command_epsilon_)
+  void gripperStateCallback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    const bool closed = msg->data;
+    const double requested_width = closed ? gripper_close_width_ : gripper_open_width_;
+    const char * state_name = closed ? "closed" : "open";
+
+    if (has_last_commanded_state_ && closed == last_commanded_closed_state_)
     {
-      RCLCPP_DEBUG(
-        this->get_logger(),
-        "Ignoring duplicate gripper command: requested=%.6f last_sent=%.6f eps=%.6f",
-        requested_width,
-        last_sent_width_,
-        command_epsilon_);
+      RCLCPP_INFO(this->get_logger(), "Skipping gripper state command (state unchanged): %s", state_name);
       return;
     }
 
-    if (goal_active_ && std::abs(requested_width - active_goal_width_) <= command_epsilon_)
+    const bool sent = sendWidthCommand(requested_width, "state", state_name);
+    if (sent)
+    {
+      has_last_commanded_state_ = true;
+      last_commanded_closed_state_ = closed;
+    }
+  }
+
+  void deprecatedGripperWidthCallback(const std_msgs::msg::Float64::SharedPtr msg)
+  {
+    RCLCPP_WARN(
+      this->get_logger(),
+      "Received deprecated width command topic %s. Prefer Bool topic %s.",
+      gripper_command_topic_.c_str(),
+      gripper_state_command_topic_.c_str());
+
+    const double requested_width = msg->data;
+    sendWidthCommand(requested_width, "deprecated_width", "n/a");
+  }
+
+  bool sendWidthCommand(double requested_width, const char * source, const char * state_name)
+  {
+    if (!std::isfinite(requested_width))
+    {
+      RCLCPP_WARN(this->get_logger(), "Skipping gripper command from %s: non-finite width", source);
+      return false;
+    }
+
+    const double clamped_width = clampWidth(requested_width);
+    if (std::abs(clamped_width - requested_width) > command_epsilon_)
+    {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "Clamped gripper width from %.6f to %.6f [source=%s state=%s]",
+        requested_width,
+        clamped_width,
+        source,
+        state_name);
+    }
+
+    if (has_last_sent_width_ && std::abs(clamped_width - last_sent_width_) <= command_epsilon_)
     {
       RCLCPP_DEBUG(
         this->get_logger(),
-        "Ignoring gripper command while equivalent goal is active: requested=%.6f active=%.6f eps=%.6f",
-        requested_width,
+        "Ignoring duplicate gripper command: requested=%.6f last_sent=%.6f eps=%.6f [source=%s state=%s]",
+        clamped_width,
+        last_sent_width_,
+        command_epsilon_,
+        source,
+        state_name);
+      return false;
+    }
+
+    if (goal_active_ && std::abs(clamped_width - active_goal_width_) <= command_epsilon_)
+    {
+      RCLCPP_DEBUG(
+        this->get_logger(),
+        "Ignoring gripper command while equivalent goal is active: requested=%.6f active=%.6f eps=%.6f [source=%s state=%s]",
+        clamped_width,
         active_goal_width_,
-        command_epsilon_);
-      return;
+        command_epsilon_,
+        source,
+        state_name);
+      return false;
+    }
+
+    const auto now_tp = std::chrono::steady_clock::now();
+    if (has_last_goal_send_time_)
+    {
+      const double dt = std::chrono::duration<double>(now_tp - last_goal_send_time_).count();
+      if (dt < min_command_interval_sec_)
+      {
+        RCLCPP_INFO(
+          this->get_logger(),
+          "Rate-limited gripper command [source=%s state=%s width=%.6f dt=%.3fs]",
+          source,
+          state_name,
+          clamped_width,
+          dt);
+        return false;
+      }
     }
 
     if (!gripper_client_->wait_for_action_server(std::chrono::milliseconds(200)))
     {
       RCLCPP_WARN(this->get_logger(), "Gripper action server not available.");
-      return;
+      return false;
     }
 
     GripperMove::Goal goal;
-    goal.width = requested_width;
+    goal.width = clamped_width;
     goal.speed = gripper_speed_;
 
     rclcpp_action::Client<GripperMove>::SendGoalOptions options;
     options.goal_response_callback =
-      [this, width = requested_width](const GripperMoveGoalHandle::SharedPtr & handle)
+      [this, width = clamped_width, source = std::string(source), state = std::string(state_name)](const GripperMoveGoalHandle::SharedPtr & handle)
       {
         if (!handle)
         {
           goal_active_ = false;
-          RCLCPP_WARN(this->get_logger(), "Gripper goal rejected.");
+          RCLCPP_WARN(this->get_logger(), "Gripper goal rejected [source=%s state=%s].", source.c_str(), state.c_str());
         }
         else
         {
           last_sent_width_ = width;
           has_last_sent_width_ = true;
-          RCLCPP_INFO(this->get_logger(), "Gripper goal accepted: width=%.3f speed=%.3f", width, gripper_speed_);
+          RCLCPP_INFO(
+            this->get_logger(),
+            "Gripper goal accepted [source=%s state=%s width=%.3f speed=%.3f]",
+            source.c_str(),
+            state.c_str(),
+            width,
+            gripper_speed_);
         }
       };
 
@@ -111,20 +205,32 @@ private:
       };
 
     goal_active_ = true;
-    active_goal_width_ = requested_width;
+    active_goal_width_ = clamped_width;
+    last_goal_send_time_ = now_tp;
+    has_last_goal_send_time_ = true;
     gripper_client_->async_send_goal(goal, options);
+    return true;
   }
 
+  std::string gripper_state_command_topic_;
   std::string gripper_command_topic_;
   std::string gripper_action_name_;
   double gripper_speed_;
+  double gripper_open_width_;
+  double gripper_close_width_;
+  double min_command_interval_sec_;
   double command_epsilon_ = 1e-3;
   bool has_last_sent_width_ = false;
   double last_sent_width_ = 0.0;
   bool goal_active_ = false;
   double active_goal_width_ = 0.0;
+  bool has_last_commanded_state_ = false;
+  bool last_commanded_closed_state_ = false;
+  bool has_last_goal_send_time_ = false;
+  std::chrono::steady_clock::time_point last_goal_send_time_;
 
-  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr gripper_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr gripper_state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr deprecated_gripper_width_sub_;
   rclcpp_action::Client<GripperMove>::SharedPtr gripper_client_;
 };
 
