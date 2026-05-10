@@ -84,7 +84,7 @@ public:
 
     home_vel_scale_ = this->declare_parameter<double>("home_vel_scale", 0.1);
     home_acc_scale_ = this->declare_parameter<double>("home_acc_scale", 0.1);
-    delayed_home_delay_ms_ = this->declare_parameter<int>("delayed_home_delay_ms", 300);
+    delayed_home_delay_ms_ = this->declare_parameter<int>("delayed_home_delay_ms", 750);
 
     episode_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/episode/control", 10);
     num_valid_episodes_pub_ = this->create_publisher<std_msgs::msg::UInt32>(
@@ -314,9 +314,11 @@ private:
     home_block_until_ = this->now() + rclcpp::Duration::from_seconds(3.0);
     RCLCPP_INFO(this->get_logger(), "Home motion started — teleop temporarily blocked");
 
-    if (teleop_session_enabled_ || teleop_goal_pending_ || teleop_goal_in_progress_ || teleop_goal_handle_)
+    if (teleop_active_ || teleop_goal_pending_ || teleop_goal_in_progress_ || teleop_goal_handle_)
     {
-      RCLCPP_INFO(this->get_logger(), "Canceling teleop action before sending home goal...");
+      RCLCPP_INFO(
+        this->get_logger(),
+        "Home requested while teleop active — canceling teleop first");
       pending_home_after_teleop_stop_ = true;
       disableTeleopSession();
       return;
@@ -379,6 +381,7 @@ private:
       {
         teleop_goal_handle_.reset();
         teleop_goal_in_progress_ = false;
+        teleop_active_ = false;
         teleop_session_enabled_ = false;
         publishTeleopCommand(2);
         RCLCPP_WARN(this->get_logger(), "Teleop action goal rejected.");
@@ -386,6 +389,7 @@ private:
         if (pending_home_after_teleop_stop_)
         {
           RCLCPP_INFO(this->get_logger(), "Teleop goal was not accepted; treating teleop as stopped.");
+          RCLCPP_INFO(this->get_logger(), "Teleop cancel completed");
           startDelayedHomeTimer();
         }
         return;
@@ -393,6 +397,7 @@ private:
 
       teleop_goal_handle_ = handle;
       teleop_goal_in_progress_ = true;
+      teleop_active_ = true;
 
       if (teleop_cancel_requested_)
       {
@@ -414,6 +419,7 @@ private:
       teleop_goal_handle_.reset();
       teleop_goal_pending_ = false;
       teleop_goal_in_progress_ = false;
+      teleop_active_ = false;
       teleop_cancel_requested_ = false;
       teleop_cancel_in_progress_ = false;
       teleop_session_enabled_ = false;
@@ -439,7 +445,7 @@ private:
 
       if (start_home_after_stop)
       {
-        RCLCPP_INFO(this->get_logger(), "Teleop fully canceled/stopped; scheduling delayed home goal.");
+        RCLCPP_INFO(this->get_logger(), "Teleop cancel completed");
         startDelayedHomeTimer();
       }
     };
@@ -484,7 +490,7 @@ private:
     if (teleop_goal_handle_)
     {
       teleop_cancel_in_progress_ = true;
-      RCLCPP_INFO(this->get_logger(), "Teleop cancel requested.");
+      RCLCPP_INFO(this->get_logger(), "Teleop cancel sent");
       teleop_client_->async_cancel_goal(
           teleop_goal_handle_,
           [this](auto future)
@@ -531,7 +537,7 @@ private:
     stopDelayedHomeTimer();
 
     const auto delay = std::chrono::milliseconds(delayed_home_delay_ms_);
-    RCLCPP_INFO(this->get_logger(), "Delayed home timer started (%d ms).", delayed_home_delay_ms_);
+    RCLCPP_INFO(this->get_logger(), "Waiting before home (%d ms)", delayed_home_delay_ms_);
     delayed_home_timer_ = this->create_wall_timer(
       delay,
       [this]()
@@ -551,6 +557,7 @@ private:
         }
 
         pending_home_after_teleop_stop_ = false;
+        RCLCPP_INFO(this->get_logger(), "Teleop fully stopped — sending home goal");
         sendHomeGoalNow();
       });
   }
@@ -702,6 +709,7 @@ private:
       RCLCPP_INFO(this->get_logger(), "Home motion finished — teleop re-enabled");
     };
 
+    RCLCPP_INFO(this->get_logger(), "Sending home goal");
     RCLCPP_INFO(this->get_logger(), "Home goal sent.");
     try
     {
@@ -757,6 +765,7 @@ private:
 
   bool has_prev_{false};
   bool teleop_session_enabled_{false};
+  bool teleop_active_ = false;
   bool home_active_ = false;
   bool home_goal_in_progress_{false};
   bool teleop_goal_pending_{false};
