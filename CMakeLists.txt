@@ -42,6 +42,12 @@ install(TARGETS
 )
 
 install(
+  PROGRAMS
+    scripts/record_manager_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
   DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
