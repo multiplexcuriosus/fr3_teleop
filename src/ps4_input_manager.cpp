@@ -9,6 +9,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joy.hpp"
+#include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/u_int8.hpp"
 #include "std_msgs/msg/u_int32.hpp"
@@ -85,6 +86,11 @@ public:
     home_vel_scale_ = this->declare_parameter<double>("home_vel_scale", 0.1);
     home_acc_scale_ = this->declare_parameter<double>("home_acc_scale", 0.1);
     delayed_home_delay_ms_ = this->declare_parameter<int>("delayed_home_delay_ms", 750);
+    home_settle_delay_ms_ = this->declare_parameter<int>("home_settle_delay_ms", delayed_home_delay_ms_);
+    joint_state_topic_ = this->declare_parameter<std::string>("joint_state_topic", "/joint_states");
+    max_joint_state_age_ms_ = this->declare_parameter<int>("max_joint_state_age_ms", 150);
+    home_requires_fresh_joint_state_ =
+      this->declare_parameter<bool>("home_requires_fresh_joint_state", true);
 
     episode_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/episode/control", 10);
     num_valid_episodes_pub_ = this->create_publisher<std_msgs::msg::UInt32>(
@@ -96,6 +102,9 @@ public:
     joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
         "/joy", 10,
         std::bind(&Ps4InputManager::joyCallback, this, std::placeholders::_1));
+    joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+      joint_state_topic_, 10,
+      std::bind(&Ps4InputManager::jointStateCallback, this, std::placeholders::_1));
 
     teleop_client_ = rclcpp_action::create_client<TeleopAction>(this, teleop_action_name_);
     home_client_ = rclcpp_action::create_client<HomeAction>(this, home_action_name_);
@@ -143,6 +152,46 @@ private:
       return 0.0;
     }
     return value;
+  }
+
+  void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
+  {
+    last_joint_state_receive_time_ = this->now();
+    last_joint_state_stamp_ = rclcpp::Time(msg->header.stamp, this->get_clock()->get_clock_type());
+    have_joint_state_ = true;
+  }
+
+  bool isJointStateFresh() const
+  {
+    if (!have_joint_state_)
+    {
+      RCLCPP_WARN(this->get_logger(), "Home rejected: joint state stale, no joint state received yet");
+      return false;
+    }
+
+    const rclcpp::Time now = this->now();
+    rclcpp::Time reference_time = last_joint_state_stamp_;
+
+    if (reference_time.nanoseconds() <= 0 || reference_time > now)
+    {
+      reference_time = last_joint_state_receive_time_;
+    }
+
+    if (reference_time.nanoseconds() <= 0 || reference_time > now)
+    {
+      RCLCPP_WARN(this->get_logger(), "Home rejected: joint state stale, invalid timestamp. Reference time: %ld, now: %ld", reference_time.nanoseconds(), now.nanoseconds());
+      return false;
+    }
+
+    const auto age = now - reference_time;
+    const auto age_ms = age.nanoseconds() / 1000000;
+    if (age_ms > static_cast<int64_t>(max_joint_state_age_ms_))
+    {
+      RCLCPP_WARN(this->get_logger(), "Home rejected: joint state stale. Reference time=%ld, now=%ld, age=%ld ms",reference_time.nanoseconds(), now.nanoseconds(), age_ms);
+      return false;
+    }
+
+    return true;
   }
 
   void joyCallback(const sensor_msgs::msg::Joy::SharedPtr msg)
@@ -298,7 +347,7 @@ private:
 
   void handleHomePressed()
   {
-    if (home_goal_in_progress_)
+    if (home_active_ || home_goal_in_progress_)
     {
       RCLCPP_WARN(this->get_logger(), "Home goal already in progress.");
       return;
@@ -310,17 +359,20 @@ private:
       return;
     }
 
-    home_active_ = true;
-    home_block_until_ = this->now() + rclcpp::Duration::from_seconds(3.0);
-    RCLCPP_INFO(this->get_logger(), "Home motion started — teleop temporarily blocked");
-
-    if (teleop_active_ || teleop_goal_pending_ || teleop_goal_in_progress_ || teleop_goal_handle_)
+    if (
+      teleop_session_enabled_ || teleop_active_ || teleop_goal_pending_ || teleop_goal_in_progress_ ||
+      teleop_goal_handle_ || teleop_cancel_in_progress_)
     {
-      RCLCPP_INFO(
-        this->get_logger(),
-        "Home requested while teleop active — canceling teleop first");
       pending_home_after_teleop_stop_ = true;
+      publishZeroTwist();
       disableTeleopSession();
+      RCLCPP_WARN(this->get_logger(), "Home delayed until teleop cancel result and settle delay completed");
+      return;
+    }
+
+    if (home_requires_fresh_joint_state_ && !isJointStateFresh())
+    {
+      pending_home_after_teleop_stop_ = false;
       return;
     }
 
@@ -536,8 +588,8 @@ private:
   {
     stopDelayedHomeTimer();
 
-    const auto delay = std::chrono::milliseconds(delayed_home_delay_ms_);
-    RCLCPP_INFO(this->get_logger(), "Waiting before home (%d ms)", delayed_home_delay_ms_);
+    const auto delay = std::chrono::milliseconds(home_settle_delay_ms_);
+    RCLCPP_INFO(this->get_logger(), "Waiting before home (%d ms)", home_settle_delay_ms_);
     delayed_home_timer_ = this->create_wall_timer(
       delay,
       [this]()
@@ -556,8 +608,22 @@ private:
           return;
         }
 
-        pending_home_after_teleop_stop_ = false;
-        RCLCPP_INFO(this->get_logger(), "Teleop fully stopped — sending home goal");
+        if (
+          teleop_session_enabled_ || teleop_active_ || teleop_goal_pending_ || teleop_goal_in_progress_ ||
+          teleop_goal_handle_ || teleop_cancel_in_progress_)
+        {
+          pending_home_after_teleop_stop_ = false;
+          RCLCPP_WARN(this->get_logger(), "Home rejected: teleop still active/canceling");
+          return;
+        }
+
+        if (home_requires_fresh_joint_state_ && !isJointStateFresh())
+        {
+          pending_home_after_teleop_stop_ = false;
+          return;
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Teleop fully stopped and settled; attempting home goal");
         sendHomeGoalNow();
       });
   }
@@ -643,23 +709,47 @@ private:
   {
     stopDelayedHomeTimer();
 
-    if (!home_client_->wait_for_action_server(std::chrono::milliseconds(200)))
+    if (
+      teleop_session_enabled_ || teleop_active_ || teleop_goal_pending_ || teleop_goal_in_progress_ ||
+      teleop_goal_handle_ || teleop_cancel_in_progress_)
     {
+      pending_home_after_teleop_stop_ = false;
       home_active_ = false;
-      RCLCPP_INFO(this->get_logger(), "Home motion finished — teleop re-enabled");
-      RCLCPP_WARN(this->get_logger(), "Home action server not available.");
+      home_goal_in_progress_ = false;
+      RCLCPP_WARN(this->get_logger(), "Home rejected: teleop still active/canceling");
+      return;
+    }
+
+    if (home_requires_fresh_joint_state_ && !isJointStateFresh())
+    {
+      pending_home_after_teleop_stop_ = false;
+      home_active_ = false;
+      home_goal_in_progress_ = false;
       return;
     }
 
     if (home_joint_names_.size() != home_joint_positions_.size())
     {
+      pending_home_after_teleop_stop_ = false;
       home_active_ = false;
-      RCLCPP_INFO(this->get_logger(), "Home motion finished — teleop re-enabled");
+      home_goal_in_progress_ = false;
       RCLCPP_ERROR(this->get_logger(), "Home joint name / position size mismatch.");
       return;
     }
 
+    if (!home_client_->wait_for_action_server(std::chrono::milliseconds(200)))
+    {
+      pending_home_after_teleop_stop_ = false;
+      home_active_ = false;
+      home_goal_in_progress_ = false;
+      RCLCPP_WARN(this->get_logger(), "Home action server not available.");
+      return;
+    }
+
+    home_active_ = true;
     home_goal_in_progress_ = true;
+    home_block_until_ = this->now() + rclcpp::Duration::from_seconds(3.0);
+    pending_home_after_teleop_stop_ = false;
     prev_teleop_axis_state_ = 0;
 
     HomeAction::Goal goal;
@@ -677,7 +767,6 @@ private:
       {
         home_active_ = false;
         home_goal_in_progress_ = false;
-        RCLCPP_INFO(this->get_logger(), "Home motion finished — teleop re-enabled");
         RCLCPP_WARN(this->get_logger(), "Home goal rejected.");
       }
       else
@@ -706,11 +795,10 @@ private:
           RCLCPP_WARN(this->get_logger(), "Unknown home result code.");
           break;
       }
-      RCLCPP_INFO(this->get_logger(), "Home motion finished — teleop re-enabled");
     };
 
-    RCLCPP_INFO(this->get_logger(), "Sending home goal");
-    RCLCPP_INFO(this->get_logger(), "Home goal sent.");
+    publishZeroTwist();
+    RCLCPP_INFO(this->get_logger(), "Home safety checks passed; sending MoveToJoint goal");
     try
     {
       home_client_->async_send_goal(goal, options);
@@ -719,7 +807,7 @@ private:
     {
       home_active_ = false;
       home_goal_in_progress_ = false;
-      RCLCPP_INFO(this->get_logger(), "Home motion finished — teleop re-enabled");
+      pending_home_after_teleop_stop_ = false;
       RCLCPP_ERROR(this->get_logger(), "Failed to send home goal: %s", e.what());
     }
   }
@@ -756,14 +844,19 @@ private:
   std::string teleop_ee_name_;
   bool teleop_move_orientation_;
   std::string home_action_name_;
+  std::string joint_state_topic_;
 
   std::vector<std::string> home_joint_names_;
   std::vector<double> home_joint_positions_;
   double home_vel_scale_;
   double home_acc_scale_;
   int delayed_home_delay_ms_;
+  int home_settle_delay_ms_;
+  int max_joint_state_age_ms_;
+  bool home_requires_fresh_joint_state_;
 
   bool has_prev_{false};
+  bool have_joint_state_{false};
   bool teleop_session_enabled_{false};
   bool teleop_active_ = false;
   bool home_active_ = false;
@@ -778,8 +871,11 @@ private:
   uint32_t num_valid_episodes_{0};
 
   std::vector<int32_t> prev_buttons_;
+  rclcpp::Time last_joint_state_stamp_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time last_joint_state_receive_time_{0, 0, RCL_ROS_TIME};
 
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr episode_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt32>::SharedPtr num_valid_episodes_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr teleop_pub_;
