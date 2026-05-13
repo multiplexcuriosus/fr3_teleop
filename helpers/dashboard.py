@@ -15,6 +15,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import UInt8, UInt32
 from std_srvs.srv import Trigger
+from std_srvs.srv import SetBool
 
 from cv_bridge import CvBridge
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
@@ -47,6 +48,10 @@ event_qos = QoSProfile(
     durability=DurabilityPolicy.VOLATILE,
 )
 
+EVENT_FRAME_MONO_TOPIC = "/openmv_cam/image"
+EVENT_FRAME_3CH_TOPIC = "/openmv_cam/event_frame_3ch"
+DEFAULT_EVENT_FRAME_VISUALIZATION = "mono"
+
 
 # ----------------------------
 # Shared latest-frame buffer
@@ -74,6 +79,13 @@ class LatestFrameBuffer:
                 return None, False, 0.0, 0
             return self._frame.copy(), self._is_rgb, self._stamp_sec, self._seq
 
+    def clear(self):
+        with self._lock:
+            self._frame = None
+            self._is_rgb = False
+            self._stamp_sec = 0.0
+            self._seq += 1
+
 
 @dataclass
 class TeleopState:
@@ -81,6 +93,7 @@ class TeleopState:
     recording_active: bool = False
     session_recording_active: bool = False
     event_frame_publishing_active: bool = False
+    debug_bypass_topic_presence: bool = False
     last_service_status: str = ""
     successful_episodes: int = 0
     episode_active: bool = False
@@ -196,6 +209,11 @@ class ImageTile(QFrame):
         )
         self.image_label.setPixmap(scaled)
 
+    def clear(self):
+        self._last_qimage = None
+        self.image_label.clear()
+        self.image_label.setText("No image")
+
 
 class MetricCard(QFrame):
     def __init__(self, title: str, initial_value: str):
@@ -301,10 +319,12 @@ class EpisodeCard(QFrame):
 
 
 class SessionRecordingControlCard(QFrame):
-    def __init__(self, on_start, on_stop):
+    def __init__(self, on_start, on_stop, on_toggle_debug_bypass):
         super().__init__()
         self._on_start = on_start
         self._on_stop = on_stop
+        self._on_toggle_debug_bypass = on_toggle_debug_bypass
+        self._debug_bypass_on = False
 
         self.setFrameShape(QFrame.StyledPanel)
         self.setStyleSheet("""
@@ -353,10 +373,13 @@ class SessionRecordingControlCard(QFrame):
 
         self.start_button = QPushButton("Start Bag/H5")
         self.stop_button = QPushButton("Stop Bag/H5")
+        self.debug_bypass_button = QPushButton("Debug Bypass: OFF")
         self.start_button.setStyleSheet("background-color: #0051a8;")
         self.stop_button.setStyleSheet("background-color: #8c1f1f;")
+        self.debug_bypass_button.setStyleSheet("background-color: #4f3a00;")
         self.start_button.clicked.connect(self._on_start)
         self.stop_button.clicked.connect(self._on_stop)
+        self.debug_bypass_button.clicked.connect(self._toggle_debug_bypass)
 
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
@@ -369,9 +392,22 @@ class SessionRecordingControlCard(QFrame):
         layout.addWidget(self.title_label)
         layout.addWidget(self.indicator, 1)
         layout.addLayout(button_row)
+        layout.addWidget(self.debug_bypass_button)
         self.setLayout(layout)
 
         self.set_active(False)
+
+    def _toggle_debug_bypass(self):
+        self._on_toggle_debug_bypass(not self._debug_bypass_on)
+
+    def set_debug_bypass(self, enabled: bool):
+        self._debug_bypass_on = bool(enabled)
+        if self._debug_bypass_on:
+            self.debug_bypass_button.setText("Debug Bypass: ON")
+            self.debug_bypass_button.setStyleSheet("background-color: #8c5f00;")
+        else:
+            self.debug_bypass_button.setText("Debug Bypass: OFF")
+            self.debug_bypass_button.setStyleSheet("background-color: #4f3a00;")
 
     def set_active(self, active: bool):
         if active:
@@ -404,10 +440,12 @@ class SessionRecordingControlCard(QFrame):
 
 
 class EventFramePublishingControlCard(QFrame):
-    def __init__(self, on_start, on_stop):
+    def __init__(self, on_start, on_stop, on_select_visualization, initial_mode: str = DEFAULT_EVENT_FRAME_VISUALIZATION):
         super().__init__()
         self._on_start = on_start
         self._on_stop = on_stop
+        self._on_select_visualization = on_select_visualization
+        self._selected_event_frame_visualization = initial_mode
 
         self.setFrameShape(QFrame.StyledPanel)
         self.setStyleSheet("""
@@ -440,19 +478,20 @@ class EventFramePublishingControlCard(QFrame):
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setStyleSheet("font-size: 18px; font-weight: 600;")
 
-        self.indicator = QLabel("OFF")
-        self.indicator.setAlignment(Qt.AlignCenter)
-        self.indicator.setMinimumHeight(86)
-        self.indicator.setStyleSheet("""
-            QLabel {
-                background-color: #7a0000;
-                color: white;
-                font-size: 30px;
-                font-weight: 800;
-                border-radius: 12px;
-                padding: 10px;
-            }
-        """)
+        self.publishing_state_label = QLabel("Publishing: OFF")
+        self.publishing_state_label.setAlignment(Qt.AlignCenter)
+        self.publishing_state_label.setMinimumHeight(42)
+        self.publishing_state_label.setStyleSheet("font-size: 20px; font-weight: 800;")
+
+        self.single_channel_button = QPushButton("Single Channel")
+        self.three_channel_button = QPushButton("3-Channel")
+        self.single_channel_button.clicked.connect(lambda: self._on_select_visualization("mono"))
+        self.three_channel_button.clicked.connect(lambda: self._on_select_visualization("3ch"))
+
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        mode_row.addWidget(self.single_channel_button)
+        mode_row.addWidget(self.three_channel_button)
 
         self.start_button = QPushButton("Start Frames")
         self.stop_button = QPushButton("Stop Frames")
@@ -470,40 +509,41 @@ class EventFramePublishingControlCard(QFrame):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
         layout.addWidget(self.title_label)
-        layout.addWidget(self.indicator, 1)
+        layout.addWidget(self.publishing_state_label)
+        layout.addLayout(mode_row)
         layout.addLayout(button_row)
         self.setLayout(layout)
 
+        self.set_visualization_mode(initial_mode)
         self.set_active(False)
 
     def set_active(self, active: bool):
         if active:
-            self.indicator.setText("ON")
-            self.indicator.setStyleSheet("""
-                QLabel {
-                    background-color: #0f7f8c;
-                    color: white;
-                    font-size: 30px;
-                    font-weight: 800;
-                    border-radius: 12px;
-                    padding: 10px;
-                }
-            """)
+            self.publishing_state_label.setText("Publishing: ON")
+            self.publishing_state_label.setStyleSheet(
+                "color: #0f7f8c; font-size: 20px; font-weight: 800;"
+            )
         else:
-            self.indicator.setText("OFF")
-            self.indicator.setStyleSheet("""
-                QLabel {
-                    background-color: #7a0000;
-                    color: white;
-                    font-size: 30px;
-                    font-weight: 800;
-                    border-radius: 12px;
-                    padding: 10px;
-                }
-            """)
+            self.publishing_state_label.setText("Publishing: OFF")
+            self.publishing_state_label.setStyleSheet(
+                "color: #b34141; font-size: 20px; font-weight: 800;"
+            )
 
         self.start_button.setEnabled(not active)
         self.stop_button.setEnabled(active)
+
+    def set_visualization_mode(self, mode: str):
+        self._selected_event_frame_visualization = mode
+
+        active_style = "background-color: #0f7f8c; color: white;"
+        inactive_style = "background-color: #2d2d2d; color: #dddddd;"
+
+        if mode == "3ch":
+            self.single_channel_button.setStyleSheet(inactive_style)
+            self.three_channel_button.setStyleSheet(active_style)
+        else:
+            self.single_channel_button.setStyleSheet(active_style)
+            self.three_channel_button.setStyleSheet(inactive_style)
 
 
 class TeleopCard(QFrame):
@@ -591,23 +631,33 @@ class TeleopDashboardNode(Node):
         self.teleop_stop_cmd = 2
 
         self.declare_parameter("rgb_topic", "/camera/camera/color/image_raw")
-        self.declare_parameter("event_topic", "/openmv_cam/image")
+        self.declare_parameter("event_frame_mono_topic", EVENT_FRAME_MONO_TOPIC)
+        self.declare_parameter("event_frame_3ch_topic", EVENT_FRAME_3CH_TOPIC)
+        self.declare_parameter("selected_event_frame_visualization", DEFAULT_EVENT_FRAME_VISUALIZATION)
         self.declare_parameter("episode_control_topic", "/episode/control")
         self.declare_parameter("teleop_control_topic", "/teleop/control")
         self.declare_parameter("num_valid_episodes_topic", "/data_collection/num_valid_episodes")
         self.declare_parameter("start_recording_service", "/record_manager/start_recording")
         self.declare_parameter("stop_recording_service", "/record_manager/stop_recording")
+        self.declare_parameter("set_debug_bypass_service", "/record_manager/set_debug_bypass_topic_presence")
         self.declare_parameter("start_event_frames_service", "/openmv_cam/start_event_frame_publishing")
         self.declare_parameter("stop_event_frames_service", "/openmv_cam/stop_event_frame_publishing")
         self.declare_parameter("service_timeout_sec", 3.0)
 
         self.rgb_topic = self.get_parameter("rgb_topic").value
-        self.event_topic = self.get_parameter("event_topic").value
+        self.event_frame_mono_topic = self.get_parameter("event_frame_mono_topic").value
+        self.event_frame_3ch_topic = self.get_parameter("event_frame_3ch_topic").value
+        self.selected_event_frame_visualization = str(
+            self.get_parameter("selected_event_frame_visualization").value
+        ).strip().lower()
+        if self.selected_event_frame_visualization not in ("mono", "3ch"):
+            self.selected_event_frame_visualization = DEFAULT_EVENT_FRAME_VISUALIZATION
         self.episode_control_topic = self.get_parameter("episode_control_topic").value
         self.teleop_control_topic = self.get_parameter("teleop_control_topic").value
         self.num_valid_episodes_topic = self.get_parameter("num_valid_episodes_topic").value
         self.start_recording_service = self.get_parameter("start_recording_service").value
         self.stop_recording_service = self.get_parameter("stop_recording_service").value
+        self.set_debug_bypass_service = self.get_parameter("set_debug_bypass_service").value
         self.start_event_frames_service = self.get_parameter("start_event_frames_service").value
         self.stop_event_frames_service = self.get_parameter("stop_event_frames_service").value
 
@@ -623,12 +673,8 @@ class TeleopDashboardNode(Node):
             self.rgb_cb,
             rgb_qos,
         )
-        self.event_sub = self.create_subscription(
-            Image,
-            self.event_topic,
-            self.event_cb,
-            event_qos,
-        )
+        self.event_frame_subscription = None
+        self.switch_event_frame_visualization_mode(self.selected_event_frame_visualization)
         self.episode_control_sub = self.create_subscription(
             UInt8,
             self.episode_control_topic,
@@ -650,18 +696,54 @@ class TeleopDashboardNode(Node):
 
         self.start_recording_client = self.create_client(Trigger, self.start_recording_service)
         self.stop_recording_client = self.create_client(Trigger, self.stop_recording_service)
+        self.set_debug_bypass_client = self.create_client(SetBool, self.set_debug_bypass_service)
         self.start_event_frames_client = self.create_client(Trigger, self.start_event_frames_service)
         self.stop_event_frames_client = self.create_client(Trigger, self.stop_event_frames_service)
 
         self.get_logger().info(f"RGB topic: {self.rgb_topic}")
-        self.get_logger().info(f"Event topic: {self.event_topic}")
+        self.get_logger().info(f"Event frame mono topic: {self.event_frame_mono_topic}")
+        self.get_logger().info(f"Event frame 3-channel topic: {self.event_frame_3ch_topic}")
+        self.get_logger().info(f"Selected event frame visualization: {self.selected_event_frame_visualization}")
         self.get_logger().info(f"Episode control topic: {self.episode_control_topic}")
         self.get_logger().info(f"Teleop control topic: {self.teleop_control_topic}")
         self.get_logger().info(f"Num valid episodes topic: {self.num_valid_episodes_topic}")
         self.get_logger().info(f"Start recording service: {self.start_recording_service}")
         self.get_logger().info(f"Stop recording service: {self.stop_recording_service}")
+        self.get_logger().info(f"Set debug bypass service: {self.set_debug_bypass_service}")
         self.get_logger().info(f"Start event frames service: {self.start_event_frames_service}")
         self.get_logger().info(f"Stop event frames service: {self.stop_event_frames_service}")
+
+    def _event_frame_topic_for_selected_mode(self) -> str:
+        if self.selected_event_frame_visualization == "3ch":
+            return self.event_frame_3ch_topic
+        return self.event_frame_mono_topic
+
+    def switch_event_frame_visualization_mode(self, mode: str):
+        mode = str(mode).strip().lower()
+        if mode not in ("mono", "3ch"):
+            self.get_logger().warning(f"Ignoring invalid visualization mode: {mode}")
+            return
+
+        self.selected_event_frame_visualization = mode
+        topic = self._event_frame_topic_for_selected_mode()
+
+        if self.event_frame_subscription is not None:
+            try:
+                self.destroy_subscription(self.event_frame_subscription)
+            except Exception as e:
+                self.get_logger().warning(f"Failed to destroy previous event frame subscription: {e}")
+            self.event_frame_subscription = None
+
+        self.event_buffer.clear()
+        self.event_frame_subscription = self.create_subscription(
+            Image,
+            topic,
+            self.event_cb,
+            event_qos,
+        )
+        self.get_logger().info(
+            f"Event frame visualization switched to {mode}; subscribed topic: {topic}"
+        )
 
     def _set_last_service_status(self, status: str):
         with self.state_lock:
@@ -716,7 +798,12 @@ class TeleopDashboardNode(Node):
                     return
 
                 if not result.success:
-                    reason = f"Service returned failure: {service_name}"
+                    detail = str(result.message).strip()
+                    reason = (
+                        f"Service returned failure: {service_name}"
+                        if not detail
+                        else f"Service returned failure: {service_name} ({detail})"
+                    )
                     self.get_logger().error(reason)
                     status = on_failure(reason)
                     if status:
@@ -748,17 +835,27 @@ class TeleopDashboardNode(Node):
     def event_cb(self, msg: Image):
         try:
             img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+            encoding = str(msg.encoding).strip().lower()
 
-            if img.ndim == 2:
+            if img.ndim == 2 or encoding == "mono8":
                 disp = pad_to_square_black(img)
                 is_rgb = False
             elif img.ndim == 3 and img.shape[2] == 3:
-                disp = pad_to_square_black(img)
-                is_rgb = False
+                if encoding == "rgb8":
+                    disp = pad_to_square_black(img)
+                    is_rgb = True
+                else:
+                    disp = pad_to_square_black(img)
+                    is_rgb = False
             elif img.ndim == 3 and img.shape[2] == 4:
-                disp = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-                disp = pad_to_square_black(disp)
-                is_rgb = False
+                if encoding == "rgba8":
+                    disp = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+                    disp = pad_to_square_black(disp)
+                    is_rgb = True
+                else:
+                    disp = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                    disp = pad_to_square_black(disp)
+                    is_rgb = False
             else:
                 self.get_logger().warning(
                     f"Unsupported event image format: encoding={msg.encoding}, shape={img.shape}"
@@ -819,6 +916,7 @@ class TeleopDashboardNode(Node):
                 recording_active=s.recording_active,
                 session_recording_active=s.session_recording_active,
                 event_frame_publishing_active=s.event_frame_publishing_active,
+                debug_bypass_topic_presence=s.debug_bypass_topic_presence,
                 last_service_status=s.last_service_status,
                 successful_episodes=s.successful_episodes,
                 episode_active=s.episode_active,
@@ -867,6 +965,58 @@ class TeleopDashboardNode(Node):
             on_success,
             on_failure,
         )
+
+    def set_debug_bypass_topic_presence(self, enabled: bool):
+        timeout_sec = self._get_double_param("service_timeout_sec")
+        service_name = self.set_debug_bypass_service
+
+        def worker():
+            desired_state = bool(enabled)
+            state_text = "ON" if desired_state else "OFF"
+            self.get_logger().info(f"Requested debug bypass topic presence: {state_text}")
+
+            try:
+                if not self._wait_for_service(self.set_debug_bypass_client, timeout_sec):
+                    reason = f"Service not available: {service_name}"
+                    self.get_logger().error(reason)
+                    self._set_last_service_status(reason)
+                    return
+
+                req = SetBool.Request()
+                req.data = desired_state
+                future = self.set_debug_bypass_client.call_async(req)
+
+                start = time.monotonic()
+                while rclpy.ok() and not future.done():
+                    if time.monotonic() - start > timeout_sec:
+                        reason = f"Service call timed out: {service_name}"
+                        self.get_logger().error(reason)
+                        self._set_last_service_status(reason)
+                        return
+                    time.sleep(0.02)
+
+                result = future.result()
+                if result is None or not result.success:
+                    detail = "" if result is None else str(result.message).strip()
+                    reason = (
+                        f"Failed to set debug bypass: {service_name}"
+                        if not detail
+                        else f"Failed to set debug bypass: {service_name} ({detail})"
+                    )
+                    self.get_logger().error(reason)
+                    self._set_last_service_status(reason)
+                    return
+
+                with self.state_lock:
+                    self.state.debug_bypass_topic_presence = desired_state
+                    self.state.last_service_status = f"Debug bypass topic presence {state_text}."
+
+            except Exception as e:
+                reason = f"Service call error for {service_name}: {e}"
+                self.get_logger().error(reason)
+                self._set_last_service_status(reason)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def start_event_frame_publishing(self):
         self.get_logger().info("Requested start of OpenMV event-frame publishing")
@@ -960,19 +1110,55 @@ class TeleopDashboardWindow(QMainWindow):
         self.session_recording_card = SessionRecordingControlCard(
             on_start=self.node.start_session_recording,
             on_stop=self.node.stop_session_recording,
+            on_toggle_debug_bypass=self.node.set_debug_bypass_topic_presence,
         )
         self.event_frames_card = EventFramePublishingControlCard(
             on_start=self.node.start_event_frame_publishing,
             on_stop=self.node.stop_event_frame_publishing,
+            on_select_visualization=self.switch_event_frame_visualization_mode,
+            initial_mode=self.node.selected_event_frame_visualization,
         )
 
-        self.help_label = QLabel("Double-click: fullscreen toggle | Status: ")
-        self.help_label.setAlignment(Qt.AlignCenter)
-        self.help_label.setStyleSheet("color: white; font-size: 16px;")
+        self.status_card = QFrame()
+        self.status_card.setFrameShape(QFrame.StyledPanel)
+        self.status_card.setStyleSheet("""
+            QFrame {
+                background-color: #111111;
+                border: 1px solid #444444;
+                border-radius: 10px;
+            }
+            QLabel {
+                color: white;
+                background-color: transparent;
+            }
+        """)
+
+        status_layout = QVBoxLayout()
+        status_layout.setContentsMargins(12, 12, 12, 12)
+        status_layout.setSpacing(8)
+
+        self.help_label = QLabel("Double-click: fullscreen toggle")
+        self.help_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.help_label.setStyleSheet("color: #cfcfcf; font-size: 14px;")
+
+        self.status_label = QLabel("Status: ")
+        self.status_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.status_label.setWordWrap(True)
+        self.status_label.setTextFormat(Qt.PlainText)
+        self.status_label.setStyleSheet("color: white; font-size: 15px;")
+        self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        status_layout.addWidget(self.help_label)
+        status_layout.addWidget(self.status_label, 1)
+        self.status_card.setLayout(status_layout)
+
+        # Keep controls usable by preventing status text from dictating row width.
+        self.status_card.setMinimumWidth(340)
+        self.status_card.setMaximumWidth(520)
 
         bottom_row.addWidget(self.session_recording_card, 1)
         bottom_row.addWidget(self.event_frames_card, 1)
-        bottom_row.addWidget(self.help_label, 2)
+        bottom_row.addWidget(self.status_card, 1)
 
         root.addLayout(top_row, 0)
         root.addLayout(image_row, 1)
@@ -982,10 +1168,16 @@ class TeleopDashboardWindow(QMainWindow):
         self.resize(1600, 950)
 
         self._is_fullscreen = False
+        self._last_event_frame_publishing_active: Optional[bool] = None
 
         if start_fullscreen:
             self.showFullScreen()
             self._is_fullscreen = True
+
+    def switch_event_frame_visualization_mode(self, mode: str):
+        self.node.switch_event_frame_visualization_mode(mode)
+        self.event_frames_card.set_visualization_mode(self.node.selected_event_frame_visualization)
+        self.event_tile.clear()
 
         self.gui_timer = QTimer(self)
         self.gui_timer.timeout.connect(self.refresh_gui)
@@ -1029,9 +1221,20 @@ class TeleopDashboardWindow(QMainWindow):
         self.teleop_card.set_teleop(s.teleop_enabled)
         self.episode_card.set_episode_active(s.episode_active)
         self.session_recording_card.set_active(s.session_recording_active)
+        self.session_recording_card.set_debug_bypass(s.debug_bypass_topic_presence)
         self.event_frames_card.set_active(s.event_frame_publishing_active)
+        self.event_frames_card.set_visualization_mode(self.node.selected_event_frame_visualization)
         self.success_card.value_label.setText(str(s.successful_episodes))
-        self.help_label.setText(f"Double-click: fullscreen toggle | Status: {s.last_service_status}")
+        self.status_label.setText(f"Status: {s.last_service_status}")
+
+        if self._last_event_frame_publishing_active is None:
+            self._last_event_frame_publishing_active = s.event_frame_publishing_active
+        elif self._last_event_frame_publishing_active and not s.event_frame_publishing_active:
+            self.event_tile.clear()
+            self.node.event_buffer.clear()
+            self._last_event_frame_publishing_active = s.event_frame_publishing_active
+        else:
+            self._last_event_frame_publishing_active = s.event_frame_publishing_active
 
         if s.episode_active and s.episode_start_monotonic is not None:
             elapsed = time.monotonic() - s.episode_start_monotonic

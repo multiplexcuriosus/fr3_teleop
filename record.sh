@@ -5,7 +5,7 @@ set -euo pipefail
 # Defaults
 # -----------------------------
 OUT_DIR="data/bags"
-PREFIX="mobile_base"
+PREFIX=""
 BAG_NAME=""
 
 # parse args like target_dir=... prefix=... name=...
@@ -51,13 +51,11 @@ cat <<EOF > "$DELETE_SCRIPT"
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUT_DIR="${OUT_DIR}"
-PREFIX="${PREFIX}"
-
-LATEST=\$(ls -dt "\${OUT_DIR}/\${PREFIX}_"* 2>/dev/null | head -n 1 || true)
+OUT_DIR="data/bags"
+LATEST=\$(ls -dt "\${OUT_DIR}/"* 2>/dev/null | head -n 1 || true)
 
 if [ -z "\$LATEST" ]; then
-  echo "No bag found for prefix '\$PREFIX' in '\$OUT_DIR'"
+  echo "No bag found  in '\$OUT_DIR'"
   exit 1
 fi
 
@@ -76,8 +74,7 @@ TOPICS=(
   /camera/camera/color/camera_info
 
   /cartesian_cmd/twist
-  /teleop/gripper_cmd
-
+  /teleop/gripper_state_cmd
   /camera/camera/color/image_raw
   /openmv_cam/image
 

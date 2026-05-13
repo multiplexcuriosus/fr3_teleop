@@ -1,0 +1,106 @@
+shared_topics:
+  episode_control: "/episode/control"
+  camera_info: "/camera/camera/color/camera_info"
+  twist_cmd: "/cartesian_cmd/twist"
+  gripper_state_command: "/teleop/gripper_state_cmd"
+  gripper_command: "/teleop/gripper_cmd"
+  rgb_image: "/camera/camera/color/image_raw"
+  openmv_mono: "/openmv_cam/image"
+  openmv_3ch: "/openmv_cam/event_frame_3ch"
+  joint_states: "/joint_states"
+  teleop_control: "/teleop/control"
+
+shared_services:
+  start_recording: "/record_manager/start_recording"
+  stop_recording: "/record_manager/stop_recording"
+  set_debug_bypass: "/record_manager/set_debug_bypass_topic_presence"
+
+openmv_cam:
+  port: "/dev/openmvcam"
+  baud: 115200
+  publish_fps: 30.0
+  topic: openmv_mono
+  publish_3_channel_img: true
+  topic_3_channel: openmv_3ch
+
+record_manager:
+  topics_to_record:
+    - episode_control
+    - camera_info
+    - twist_cmd
+    - gripper_state_command
+    - rgb_image
+    - openmv_mono
+    - openmv_3ch
+    - joint_states
+
+teleop_dashboard:
+  event_frame_mono_topic: openmv_mono
+  event_frame_3ch_topic: openmv_3ch
+  episode_control_topic: episode_control
+  start_recording_service: start_recording
+  stop_recording_service: stop_recording
+  set_debug_bypass_service: set_debug_bypass
+
+ps4_input_manager:
+  button_gripper_open: 2
+  button_gripper_close: 0
+  axis_episode: 6
+  button_home: 1
+  axis_teleop: 7
+
+  left_stick_x_idx: 0
+  left_stick_y_idx: 1
+  right_stick_y_idx: 4
+
+  deadzone: 0.08
+  max_vx: 0.08
+  max_vy: 0.08
+  max_vz: 0.05
+
+  haptic_pos_multiplier: 2.0
+  haptic_lin_vel_multiplier: 1.0
+  haptic_ori_multiplier: 1.0
+  haptic_ang_vel_multiplier: 1.0
+
+  twist_topic_name: twist_cmd
+  twist_frame_id: "base_link"
+  teleop_control_topic: teleop_control
+  teleop_action_name: "/cartesian_executor"
+  teleop_mode: 0
+  teleop_ee_name: "right_fr3_hand_tcp"
+  teleop_move_orientation: false
+
+  gripper_state_command_topic: gripper_state_command
+
+  home_action_name: "/fr3_move_to_joint"
+
+  home_joint_names:
+    - right_fr3_joint1
+    - right_fr3_joint2
+    - right_fr3_joint3
+    - right_fr3_joint4
+    - right_fr3_joint5
+    - right_fr3_joint6
+    - right_fr3_joint7
+
+  home_joint_positions:
+    - -0.00
+    - -0.17894121136367586
+    - 0.0
+    - -2.7817434397297225
+    - 0.00
+    - 2.62409615716241
+    - 0.7714418627146631
+
+  home_vel_scale: 0.1
+  home_acc_scale: 0.1
+
+gripper_manager:
+  gripper_state_command_topic: gripper_state_command
+  gripper_command_topic: gripper_command
+  gripper_action_name: "/right_franka_gripper/move"
+  gripper_speed: 0.05
+  gripper_open_width: 0.080
+  gripper_close_width: 0.06
+  min_command_interval_sec: 0.5
