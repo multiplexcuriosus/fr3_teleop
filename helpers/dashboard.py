@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import cv2
+import h5py
 import numpy as np
 
 import rclpy
@@ -634,6 +635,11 @@ class TeleopDashboardNode(Node):
         self.declare_parameter("event_frame_mono_topic", EVENT_FRAME_MONO_TOPIC)
         self.declare_parameter("event_frame_3ch_topic", EVENT_FRAME_3CH_TOPIC)
         self.declare_parameter("selected_event_frame_visualization", DEFAULT_EVENT_FRAME_VISUALIZATION)
+        self.declare_parameter("overlay_hdf5_path", "/home/jau/dyros/src/fr3_teleop/helpers/overlay_ref.hdf5")
+        self.declare_parameter("overlay_data_path", "/observations/images/rgb")
+        self.declare_parameter("overlay_frame_index", 0)
+        self.declare_parameter("overlay_alpha", 0.5)
+        self.declare_parameter("overlay_rotate_ref_180", True)
         self.declare_parameter("episode_control_topic", "/episode/control")
         self.declare_parameter("teleop_control_topic", "/teleop/control")
         self.declare_parameter("num_valid_episodes_topic", "/data_collection/num_valid_episodes")
@@ -652,6 +658,12 @@ class TeleopDashboardNode(Node):
         ).strip().lower()
         if self.selected_event_frame_visualization not in ("mono", "3ch"):
             self.selected_event_frame_visualization = DEFAULT_EVENT_FRAME_VISUALIZATION
+        self.overlay_hdf5_path = str(self.get_parameter("overlay_hdf5_path").value).strip()
+        self.overlay_data_path = str(self.get_parameter("overlay_data_path").value).strip()
+        self.overlay_frame_index = max(0, int(self.get_parameter("overlay_frame_index").value))
+        self.overlay_alpha = float(self.get_parameter("overlay_alpha").value)
+        self.overlay_alpha = min(1.0, max(0.0, self.overlay_alpha))
+        self.overlay_rotate_ref_180 = bool(self.get_parameter("overlay_rotate_ref_180").value)
         self.episode_control_topic = self.get_parameter("episode_control_topic").value
         self.teleop_control_topic = self.get_parameter("teleop_control_topic").value
         self.num_valid_episodes_topic = self.get_parameter("num_valid_episodes_topic").value
@@ -663,6 +675,9 @@ class TeleopDashboardNode(Node):
 
         self.rgb_buffer = LatestFrameBuffer()
         self.event_buffer = LatestFrameBuffer()
+        self.overlay_ref_bgr: Optional[np.ndarray] = None
+        self.overlay_status_text = "Overlay disabled (no HDF5 configured)."
+        self._load_overlay_reference_image()
 
         self.state_lock = threading.Lock()
         self.state = TeleopState()
@@ -704,6 +719,12 @@ class TeleopDashboardNode(Node):
         self.get_logger().info(f"Event frame mono topic: {self.event_frame_mono_topic}")
         self.get_logger().info(f"Event frame 3-channel topic: {self.event_frame_3ch_topic}")
         self.get_logger().info(f"Selected event frame visualization: {self.selected_event_frame_visualization}")
+        self.get_logger().info(f"Overlay HDF5 path: {self.overlay_hdf5_path}")
+        self.get_logger().info(f"Overlay data path: {self.overlay_data_path}")
+        self.get_logger().info(f"Overlay frame index: {self.overlay_frame_index}")
+        self.get_logger().info(f"Overlay alpha: {self.overlay_alpha:.3f}")
+        self.get_logger().info(f"Overlay rotate ref 180: {self.overlay_rotate_ref_180}")
+        self.get_logger().info(self.overlay_status_text)
         self.get_logger().info(f"Episode control topic: {self.episode_control_topic}")
         self.get_logger().info(f"Teleop control topic: {self.teleop_control_topic}")
         self.get_logger().info(f"Num valid episodes topic: {self.num_valid_episodes_topic}")
@@ -712,6 +733,91 @@ class TeleopDashboardNode(Node):
         self.get_logger().info(f"Set debug bypass service: {self.set_debug_bypass_service}")
         self.get_logger().info(f"Start event frames service: {self.start_event_frames_service}")
         self.get_logger().info(f"Stop event frames service: {self.stop_event_frames_service}")
+
+    def _load_overlay_reference_image(self):
+        if not self.overlay_hdf5_path:
+            self.overlay_ref_bgr = None
+            self.overlay_status_text = "Overlay disabled (no HDF5 configured)."
+            return
+
+        try:
+            with h5py.File(self.overlay_hdf5_path, "r") as f:
+                if self.overlay_data_path not in f:
+                    raise KeyError(
+                        f"Data path '{self.overlay_data_path}' not found in {self.overlay_hdf5_path}"
+                    )
+
+                data = f[self.overlay_data_path]
+                if data.ndim == 4:
+                    frame_idx = min(self.overlay_frame_index, data.shape[0] - 1)
+                    img = data[frame_idx]
+                elif data.ndim == 3:
+                    frame_idx = 0
+                    img = data[...]
+                else:
+                    raise ValueError(f"Unsupported image shape: {data.shape}")
+
+            img = np.asarray(img)
+
+            if img.ndim == 3 and img.shape[0] in (1, 3, 4) and img.shape[-1] not in (1, 3, 4):
+                img = np.transpose(img, (1, 2, 0))
+
+            if np.issubdtype(img.dtype, np.floating):
+                if img.max() <= 1.0:
+                    img = img * 255.0
+                img = np.clip(img, 0, 255).astype(np.uint8)
+            else:
+                img = img.astype(np.uint8)
+
+            if img.ndim == 2:
+                ref_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            elif img.shape[2] == 1:
+                ref_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            elif img.shape[2] == 3:
+                # Match overlay.py behavior: assume HDF5 image is RGB.
+                ref_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            elif img.shape[2] == 4:
+                ref_bgr = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+            else:
+                raise ValueError(f"Unsupported channel count: {img.shape}")
+
+            if self.overlay_rotate_ref_180:
+                ref_bgr = cv2.rotate(ref_bgr, cv2.ROTATE_180)
+
+            self.overlay_ref_bgr = ref_bgr
+            self.overlay_status_text = (
+                f"Overlay ready: {self.overlay_hdf5_path} [{self.overlay_data_path}] frame {frame_idx}, "
+                f"alpha={self.overlay_alpha:.2f}"
+            )
+
+        except Exception as e:
+            self.overlay_ref_bgr = None
+            self.overlay_status_text = f"Overlay unavailable: {e}"
+            self.get_logger().error(self.overlay_status_text)
+
+    def overlay_available(self) -> bool:
+        return self.overlay_ref_bgr is not None
+
+    def compose_overlay_rgb(self, live_bgr: np.ndarray) -> np.ndarray:
+        if self.overlay_ref_bgr is None:
+            return live_bgr
+
+        if live_bgr.shape[:2] != self.overlay_ref_bgr.shape[:2]:
+            ref = cv2.resize(
+                self.overlay_ref_bgr,
+                (live_bgr.shape[1], live_bgr.shape[0]),
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            ref = self.overlay_ref_bgr
+
+        return cv2.addWeighted(
+            ref,
+            self.overlay_alpha,
+            live_bgr,
+            1.0 - self.overlay_alpha,
+            0.0,
+        )
 
     def _event_frame_topic_for_selected_mode(self) -> str:
         if self.selected_event_frame_visualization == "3ch":
@@ -1069,6 +1175,7 @@ class TeleopDashboardWindow(QMainWindow):
     def __init__(self, node: TeleopDashboardNode, start_fullscreen: bool = True):
         super().__init__()
         self.node = node
+        self.use_overlay_rgb = False
         self.setWindowTitle("Teleop Dashboard")
 
         central = QWidget()
@@ -1141,6 +1248,15 @@ class TeleopDashboardWindow(QMainWindow):
         self.help_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.help_label.setStyleSheet("color: #cfcfcf; font-size: 14px;")
 
+        self.overlay_toggle_button = QPushButton("RGB Mode: Live")
+        self.overlay_toggle_button.setStyleSheet(
+            "background-color: #2d2d2d; color: #dddddd; border-radius: 8px; padding: 8px 12px;"
+        )
+        self.overlay_toggle_button.clicked.connect(self.toggle_overlay_mode)
+        self.overlay_toggle_button.setEnabled(self.node.overlay_available())
+        if not self.node.overlay_available():
+            self.overlay_toggle_button.setText("RGB Mode: Live (Overlay Unavailable)")
+
         self.status_label = QLabel("Status: ")
         self.status_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.status_label.setWordWrap(True)
@@ -1149,6 +1265,7 @@ class TeleopDashboardWindow(QMainWindow):
         self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         status_layout.addWidget(self.help_label)
+        status_layout.addWidget(self.overlay_toggle_button)
         status_layout.addWidget(self.status_label, 1)
         self.status_card.setLayout(status_layout)
 
@@ -1170,18 +1287,35 @@ class TeleopDashboardWindow(QMainWindow):
         self._is_fullscreen = False
         self._last_event_frame_publishing_active: Optional[bool] = None
 
+        self.gui_timer = QTimer(self)
+        self.gui_timer.timeout.connect(self.refresh_gui)
+        self.gui_timer.start(50)  # 20 Hz GUI refresh
+
         if start_fullscreen:
             self.showFullScreen()
             self._is_fullscreen = True
+
+    def toggle_overlay_mode(self):
+        if not self.node.overlay_available():
+            return
+        self.use_overlay_rgb = not self.use_overlay_rgb
+        if self.use_overlay_rgb:
+            self.overlay_toggle_button.setText("RGB Mode: Overlay")
+            self.overlay_toggle_button.setStyleSheet(
+                "background-color: #0f7f8c; color: white; border-radius: 8px; padding: 8px 12px;"
+            )
+            self.rgb_tile.title_label.setText("RGB (Overlay)")
+        else:
+            self.overlay_toggle_button.setText("RGB Mode: Live")
+            self.overlay_toggle_button.setStyleSheet(
+                "background-color: #2d2d2d; color: #dddddd; border-radius: 8px; padding: 8px 12px;"
+            )
+            self.rgb_tile.title_label.setText("RGB")
 
     def switch_event_frame_visualization_mode(self, mode: str):
         self.node.switch_event_frame_visualization_mode(mode)
         self.event_frames_card.set_visualization_mode(self.node.selected_event_frame_visualization)
         self.event_tile.clear()
-
-        self.gui_timer = QTimer(self)
-        self.gui_timer.timeout.connect(self.refresh_gui)
-        self.gui_timer.start(50)  # 20 Hz GUI refresh
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -1203,7 +1337,11 @@ class TeleopDashboardWindow(QMainWindow):
         rgb_frame, rgb_is_rgb, _, _ = self.node.rgb_buffer.get()
         if rgb_frame is not None:
             try:
-                qimg = np_to_qimage(rgb_frame, already_rgb=rgb_is_rgb)
+                display_rgb_frame = rgb_frame
+                if self.use_overlay_rgb and not rgb_is_rgb:
+                    display_rgb_frame = self.node.compose_overlay_rgb(rgb_frame)
+
+                qimg = np_to_qimage(display_rgb_frame, already_rgb=rgb_is_rgb)
                 self.rgb_tile.set_qimage(qimg)
             except Exception:
                 pass
@@ -1225,7 +1363,12 @@ class TeleopDashboardWindow(QMainWindow):
         self.event_frames_card.set_active(s.event_frame_publishing_active)
         self.event_frames_card.set_visualization_mode(self.node.selected_event_frame_visualization)
         self.success_card.value_label.setText(str(s.successful_episodes))
-        self.status_label.setText(f"Status: {s.last_service_status}")
+        overlay_mode = "Overlay" if self.use_overlay_rgb else "Live"
+        self.status_label.setText(
+            f"Status: {s.last_service_status}\n"
+            f"RGB Mode: {overlay_mode}\n"
+            f"{self.node.overlay_status_text}"
+        )
 
         if self._last_event_frame_publishing_active is None:
             self._last_event_frame_publishing_active = s.event_frame_publishing_active
