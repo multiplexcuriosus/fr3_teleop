@@ -59,7 +59,7 @@ public:
       "gripper_state_command_topic", "/teleop/gripper_state_cmd");
     teleop_control_topic_ = this->declare_parameter<std::string>("teleop_control_topic", "/teleop/control");
     teleop_action_name_ = this->declare_parameter<std::string>("teleop_action_name", "/cartesian_executor");
-    teleop_mode_ = this->declare_parameter<int>("teleop_mode", 0);
+    teleop_mode_ = 0;
     teleop_ee_name_ = this->declare_parameter<std::string>("teleop_ee_name", "right_fr3_hand_tcp");
     teleop_move_orientation_ = this->declare_parameter<bool>("teleop_move_orientation", false);
 
@@ -87,8 +87,8 @@ public:
     home_acc_scale_ = this->declare_parameter<double>("home_acc_scale", 0.1);
     delayed_home_delay_ms_ = this->declare_parameter<int>("delayed_home_delay_ms", 750);
     home_settle_delay_ms_ = this->declare_parameter<int>("home_settle_delay_ms", delayed_home_delay_ms_);
-    joint_state_topic_ = this->declare_parameter<std::string>("joint_state_topic", "/joint_states");
-    max_joint_state_age_ms_ = this->declare_parameter<int>("max_joint_state_age_ms", 150);
+    joint_state_topic_ = this->declare_parameter<std::string>("joint_state_topic", "/right_fr3/joint_states");
+    max_joint_state_age_ms_ = this->declare_parameter<int>("max_joint_state_age_ms", 250);
     home_requires_fresh_joint_state_ =
       this->declare_parameter<bool>("home_requires_fresh_joint_state", true);
 
@@ -413,6 +413,9 @@ private:
       RCLCPP_WARN(this->get_logger(), "Teleop action server not available.");
       return;
     }
+
+    RCLCPP_WARN(this->get_logger(), "Teleop mode: %ld", teleop_mode_);
+
 
     TeleopAction::Goal goal;
     goal.mode = teleop_mode_;
@@ -757,6 +760,11 @@ private:
     goal.target_positions = home_joint_positions_;
     goal.max_velocity_scaling_factor = home_vel_scale_;
     goal.max_acceleration_scaling_factor = home_acc_scale_;
+    
+    RCLCPP_WARN(this->get_logger(), "Home joint names : %zu", goal.joint_names.size());
+    RCLCPP_WARN(this->get_logger(), "Home target positions size: %zu", goal.target_positions.size());
+    RCLCPP_WARN(this->get_logger(), "Home max velocity scaling factor: %f", goal.max_velocity_scaling_factor);
+    RCLCPP_WARN(this->get_logger(), "Home max acceleration scaling factor: %f", goal.max_acceleration_scaling_factor);
 
     rclcpp_action::Client<HomeAction>::SendGoalOptions options;
 
