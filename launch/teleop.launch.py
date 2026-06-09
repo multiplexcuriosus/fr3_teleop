@@ -10,8 +10,6 @@ import os
 from fr3_teleop.config.teleop_config import (
     TOPICS_TO_RECORD,
     DASHBOARD_PARAMS,
-    PS4_PARAMS,
-    GRIPPER_PARAMS,
 )
 
 
@@ -31,6 +29,7 @@ def _dashboard_ros_args(params):
 
 def generate_launch_description():
     pkg_share = get_package_share_directory("fr3_teleop")
+    teleop_config_yaml = os.path.join(pkg_share, "config", "teleop_config.yaml")
     dashboard_script = "/home/jau/dyros/src/fr3_teleop/helpers/dashboard.py"
 
     print(f"[teleop.launch] Recording topics: {TOPICS_TO_RECORD}")
@@ -121,14 +120,14 @@ def generate_launch_description():
             executable="ps4_input_manager",
             name="ps4_input_manager",
             output="screen",
-            parameters=[PS4_PARAMS],
+            parameters=[teleop_config_yaml],
         ),
         Node(
             package="fr3_teleop",
             executable="gripper_manager",
             name="gripper_manager",
             output="screen",
-            parameters=[GRIPPER_PARAMS],
+            parameters=[teleop_config_yaml],
         ),
         dashboard_process,
         IncludeLaunchDescription(
