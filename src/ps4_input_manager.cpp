@@ -57,6 +57,8 @@ public:
     twist_frame_id_ = this->declare_parameter<std::string>("twist_frame_id", "base_link");
     gripper_state_command_topic_ = this->declare_parameter<std::string>(
       "gripper_state_command_topic", "/teleop/gripper_state_cmd");
+    gripper_inhibit_topic_ = this->declare_parameter<std::string>(
+      "gripper_inhibit_topic", "/teleop/gripper_inhibit");
     teleop_control_topic_ = this->declare_parameter<std::string>("teleop_control_topic", "/teleop/control");
     teleop_action_name_ = this->declare_parameter<std::string>("teleop_action_name", "/cartesian_executor");
     teleop_mode_ = 0;
@@ -92,12 +94,15 @@ public:
     home_requires_fresh_joint_state_ =
       this->declare_parameter<bool>("home_requires_fresh_joint_state", true);
 
+    const auto command_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+
     episode_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/episode/control", 10);
     num_valid_episodes_pub_ = this->create_publisher<std_msgs::msg::UInt32>(
       "/data_collection/num_valid_episodes", 10);
-    teleop_pub_ = this->create_publisher<std_msgs::msg::UInt8>(teleop_control_topic_, 10);
-    gripper_state_pub_ = this->create_publisher<std_msgs::msg::Bool>(gripper_state_command_topic_, 10);
-    twist_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(twist_topic_name_, 10);
+    teleop_pub_ = this->create_publisher<std_msgs::msg::UInt8>(teleop_control_topic_, command_qos);
+    gripper_state_pub_ = this->create_publisher<std_msgs::msg::Bool>(gripper_state_command_topic_, command_qos);
+    gripper_inhibit_pub_ = this->create_publisher<std_msgs::msg::Bool>(gripper_inhibit_topic_, command_qos);
+    twist_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(twist_topic_name_, command_qos);
 
     joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
         "/joy", 10,
@@ -115,8 +120,9 @@ public:
     RCLCPP_INFO(this->get_logger(), "Valid episode count topic: /data_collection/num_valid_episodes");
     RCLCPP_INFO(this->get_logger(), "Teleop control topic: %s", teleop_control_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "Gripper state command topic: %s", gripper_state_command_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Gripper inhibit topic: %s", gripper_inhibit_topic_.c_str());
     publishNumValidEpisodes();
-    publishGripperStateCommand(current_gripper_closed_state_);
+    publishGripperInhibit(true);
   }
 
 private:
@@ -143,6 +149,12 @@ private:
     const int curr = buttonSafe(current, idx);
     const int prev = buttonSafe(prev_buttons_, idx);
     return (curr == 1 && prev == 0);
+  }
+
+  bool gripperBlockedByTransition() const
+  {
+    return home_active_ || home_goal_in_progress_ || pending_home_after_teleop_stop_ ||
+      teleop_cancel_in_progress_ || teleop_cancel_requested_ || this->now() < home_block_until_;
   }
 
   double applyDeadzone(double value) const
@@ -202,11 +214,25 @@ private:
       has_prev_ = true;
     }
 
+    const bool home_edge = risingEdge(msg->buttons, button_home_);
+    if (home_edge)
+    {
+      publishZeroTwist();
+      publishGripperInhibit(true);
+      handleHomePressed();
+      prev_buttons_ = msg->buttons;
+      return;
+    }
+
     if (risingEdge(msg->buttons, button_gripper_open_))
     {
       if (!teleop_session_enabled_)
       {
         RCLCPP_WARN(this->get_logger(), "Ignoring gripper open: teleop session is not enabled.");
+      }
+      else if (gripperBlockedByTransition())
+      {
+        RCLCPP_WARN(this->get_logger(), "Ignoring gripper open: teleop/home transition is active.");
       }
       else
       {
@@ -219,6 +245,10 @@ private:
       if (!teleop_session_enabled_)
       {
         RCLCPP_WARN(this->get_logger(), "Ignoring gripper close: teleop session is not enabled.");
+      }
+      else if (gripperBlockedByTransition())
+      {
+        RCLCPP_WARN(this->get_logger(), "Ignoring gripper close: teleop/home transition is active.");
       }
       else
       {
@@ -254,12 +284,6 @@ private:
     {
       handleEpisodeAxis(msg);
     }
-
-    if (risingEdge(msg->buttons, button_home_))
-    {
-      handleHomePressed();
-    }
-
     handleTeleopAxis(msg);
 
     handleTeleopTwist(msg);
@@ -461,6 +485,7 @@ private:
       }
 
       teleop_session_enabled_ = true;
+      publishGripperInhibit(false);
       publishTeleopCommand(1);
       publishZeroTwist();
       RCLCPP_INFO(this->get_logger(), "Teleop session enabled.");
@@ -480,6 +505,7 @@ private:
       teleop_session_enabled_ = false;
 
       publishTeleopCommand(2);
+      publishGripperInhibit(true);
       publishZeroTwist();
 
       switch (result.code)
@@ -524,6 +550,7 @@ private:
       publishTeleopCommand(2);
     }
 
+    publishGripperInhibit(true);
     publishZeroTwist();
 
     if (teleop_goal_pending_ || teleop_goal_in_progress_ || teleop_goal_handle_)
@@ -708,6 +735,21 @@ private:
     RCLCPP_INFO(this->get_logger(), "Published gripper state command: %s", closed ? "CLOSED" : "OPEN");
   }
 
+  void publishGripperInhibit(bool inhibited)
+  {
+    if (has_published_gripper_inhibit_ && current_gripper_inhibited_ == inhibited)
+    {
+      return;
+    }
+
+    std_msgs::msg::Bool msg;
+    msg.data = inhibited;
+    gripper_inhibit_pub_->publish(msg);
+    current_gripper_inhibited_ = inhibited;
+    has_published_gripper_inhibit_ = true;
+    RCLCPP_INFO(this->get_logger(), "Published gripper inhibit: %s", inhibited ? "true" : "false");
+  }
+
   void sendHomeGoalNow()
   {
     stopDelayedHomeTimer();
@@ -844,6 +886,7 @@ private:
   double haptic_ang_vel_multiplier_;
 
   std::string gripper_state_command_topic_;
+  std::string gripper_inhibit_topic_;
   std::string twist_topic_name_;
   std::string twist_frame_id_;
   std::string teleop_control_topic_;
@@ -875,6 +918,8 @@ private:
   bool teleop_cancel_in_progress_{false};
   bool pending_home_after_teleop_stop_{false};
   bool current_gripper_closed_state_{false};
+  bool current_gripper_inhibited_{true};
+  bool has_published_gripper_inhibit_{false};
   bool episode_recording_{false};
   uint32_t num_valid_episodes_{0};
 
@@ -888,6 +933,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::UInt32>::SharedPtr num_valid_episodes_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr teleop_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_state_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_inhibit_pub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_pub_;
 
   rclcpp_action::Client<TeleopAction>::SharedPtr teleop_client_;
