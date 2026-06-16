@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 #include <functional>
 #include <stdexcept>
 
@@ -13,6 +14,7 @@
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/u_int8.hpp"
 #include "std_msgs/msg/u_int32.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 
@@ -48,6 +50,23 @@ public:
     max_vy_ = this->declare_parameter<double>("max_vy", 0.08);
     max_vz_ = this->declare_parameter<double>("max_vz", 0.05);
 
+    spacemouse_deadzone_ = this->declare_parameter<double>("spacemouse_deadzone", 0.08);
+    spacemouse_timeout_ms_ = this->declare_parameter<int>("spacemouse_timeout_ms", 200);
+    ps4_override_hold_ms_ = this->declare_parameter<int>("ps4_override_hold_ms", 300);
+    spacemouse_max_vx_ = this->declare_parameter<double>("spacemouse_max_vx", max_vx_);
+    spacemouse_max_vy_ = this->declare_parameter<double>("spacemouse_max_vy", max_vy_);
+    spacemouse_max_vz_ = this->declare_parameter<double>("spacemouse_max_vz", max_vz_);
+    spacemouse_enable_rotation_ = this->declare_parameter<bool>("spacemouse_enable_rotation", false);
+    spacemouse_max_wx_ = this->declare_parameter<double>("spacemouse_max_wx", 0.3);
+    spacemouse_max_wy_ = this->declare_parameter<double>("spacemouse_max_wy", 0.3);
+    spacemouse_max_wz_ = this->declare_parameter<double>("spacemouse_max_wz", 0.3);
+    spacemouse_sign_x_ = this->declare_parameter<double>("spacemouse_sign_x", 1.0);
+    spacemouse_sign_y_ = this->declare_parameter<double>("spacemouse_sign_y", 1.0);
+    spacemouse_sign_z_ = this->declare_parameter<double>("spacemouse_sign_z", 1.0);
+    spacemouse_sign_roll_ = this->declare_parameter<double>("spacemouse_sign_roll", 1.0);
+    spacemouse_sign_pitch_ = this->declare_parameter<double>("spacemouse_sign_pitch", 1.0);
+    spacemouse_sign_yaw_ = this->declare_parameter<double>("spacemouse_sign_yaw", 1.0);
+
     haptic_pos_multiplier_ = this->declare_parameter<double>("haptic_pos_multiplier", 2.0);
     haptic_lin_vel_multiplier_ = this->declare_parameter<double>("haptic_lin_vel_multiplier", 1.0);
     haptic_ori_multiplier_ = this->declare_parameter<double>("haptic_ori_multiplier", 1.0);
@@ -64,6 +83,7 @@ public:
     teleop_mode_ = 0;
     teleop_ee_name_ = this->declare_parameter<std::string>("teleop_ee_name", "right_fr3_hand_tcp");
     teleop_move_orientation_ = this->declare_parameter<bool>("teleop_move_orientation", false);
+    spacemouse_topic_name_ = this->declare_parameter<std::string>("spacemouse_topic_name", "/spacemouse_cmd");
 
     // Action names
     home_action_name_ = this->declare_parameter<std::string>(
@@ -110,6 +130,9 @@ public:
     joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
       joint_state_topic_, 10,
       std::bind(&Ps4InputManager::jointStateCallback, this, std::placeholders::_1));
+    spacemouse_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
+      spacemouse_topic_name_, 10,
+      std::bind(&Ps4InputManager::spacemouseCallback, this, std::placeholders::_1));
 
     teleop_client_ = rclcpp_action::create_client<TeleopAction>(this, teleop_action_name_);
     home_client_ = rclcpp_action::create_client<HomeAction>(this, home_action_name_);
@@ -121,6 +144,9 @@ public:
     RCLCPP_INFO(this->get_logger(), "Teleop control topic: %s", teleop_control_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "Gripper state command topic: %s", gripper_state_command_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "Gripper inhibit topic: %s", gripper_inhibit_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "SpaceMouse topic: %s", spacemouse_topic_name_.c_str());
+    RCLCPP_INFO(this->get_logger(), "SpaceMouse timeout (ms): %d", spacemouse_timeout_ms_);
+    RCLCPP_INFO(this->get_logger(), "SpaceMouse rotation enabled: %s", spacemouse_enable_rotation_ ? "true" : "false");
     publishNumValidEpisodes();
     publishGripperInhibit(true);
   }
@@ -173,6 +199,13 @@ private:
     have_joint_state_ = true;
   }
 
+  void spacemouseCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
+  {
+    last_spacemouse_msg_ = *msg;
+    last_spacemouse_time_ = this->now();
+    have_spacemouse_msg_ = true;
+  }
+
   bool isJointStateFresh() const
   {
     if (!have_joint_state_)
@@ -204,6 +237,38 @@ private:
     }
 
     return true;
+  }
+
+  bool isSpaceMouseFresh() const
+  {
+    if (!have_spacemouse_msg_)
+    {
+      return false;
+    }
+
+    const rclcpp::Time now = this->now();
+    if (last_spacemouse_time_.nanoseconds() <= 0 || last_spacemouse_time_ > now)
+    {
+      return false;
+    }
+
+    const auto age_ms = (now - last_spacemouse_time_).nanoseconds() / 1000000;
+    return age_ms <= static_cast<int64_t>(spacemouse_timeout_ms_);
+  }
+
+  double applySpaceMouseDeadzone(double value) const
+  {
+    if (std::abs(value) < spacemouse_deadzone_)
+    {
+      return 0.0;
+    }
+    return value;
+  }
+
+  double scaleSpaceMouseAxis(double value, double sign, double max_value) const
+  {
+    const double input = std::clamp(applySpaceMouseDeadzone(value), -1.0, 1.0);
+    return input * sign * max_value;
   }
 
   void joyCallback(const sensor_msgs::msg::Joy::SharedPtr msg)
@@ -671,19 +736,86 @@ private:
     const double ly = applyDeadzone(axisSafe(msg->axes, left_stick_y_idx_));
     const double ry = applyDeadzone(axisSafe(msg->axes, right_stick_y_idx_));
 
-    // This sign convention may need one final flip depending on your robot frame.
-    // But structurally this is the right place for the mapping now.
+    const bool ps4_active = (lx != 0.0) || (ly != 0.0) || (ry != 0.0);
+    const rclcpp::Time now = this->now();
+
+    if (ps4_active)
+    {
+      last_ps4_motion_time_ = now;
+      publishPs4Twist(lx, ly, ry);
+      return;
+    }
+
+    if (last_ps4_motion_time_.nanoseconds() > 0)
+    {
+      const auto hold_ms = (now - last_ps4_motion_time_).nanoseconds() / 1000000;
+      if (hold_ms >= 0 && hold_ms <= static_cast<int64_t>(ps4_override_hold_ms_))
+      {
+        publishZeroTwist();
+        return;
+      }
+    }
+
+    if (isSpaceMouseFresh())
+    {
+      publishSpaceMouseTwist(last_spacemouse_msg_);
+      return;
+    }
+
+    publishZeroTwist();
+  }
+
+  void publishPs4Twist(double lx, double ly, double ry)
+  {
     geometry_msgs::msg::TwistStamped twist_msg;
     twist_msg.header.stamp = this->now();
     twist_msg.header.frame_id = twist_frame_id_;
 
-    twist_msg.twist.linear.x = (ly) * max_vx_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
-    twist_msg.twist.linear.y = (-lx) * max_vy_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
-    twist_msg.twist.linear.z = (-ry) * max_vz_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+    twist_msg.twist.linear.x = ly * max_vx_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+    twist_msg.twist.linear.y = -lx * max_vy_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+    twist_msg.twist.linear.z = -ry * max_vz_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
 
     twist_msg.twist.angular.x = 0.0;
     twist_msg.twist.angular.y = 0.0;
     twist_msg.twist.angular.z = 0.0;
+
+    twist_pub_->publish(twist_msg);
+  }
+
+  void publishSpaceMouseTwist(const geometry_msgs::msg::Twist & msg)
+  {
+    geometry_msgs::msg::TwistStamped twist_msg;
+    twist_msg.header.stamp = this->now();
+    twist_msg.header.frame_id = twist_frame_id_;
+
+    twist_msg.twist.linear.x =
+      scaleSpaceMouseAxis(msg.linear.x, spacemouse_sign_x_, spacemouse_max_vx_) *
+      haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+    twist_msg.twist.linear.y =
+      scaleSpaceMouseAxis(msg.linear.y, spacemouse_sign_y_, spacemouse_max_vy_) *
+      haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+    twist_msg.twist.linear.z =
+      scaleSpaceMouseAxis(msg.linear.z, spacemouse_sign_z_, spacemouse_max_vz_) *
+      haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+
+    if (spacemouse_enable_rotation_)
+    {
+      twist_msg.twist.angular.x =
+        scaleSpaceMouseAxis(msg.angular.x, spacemouse_sign_roll_, spacemouse_max_wx_) *
+        haptic_ori_multiplier_ * haptic_ang_vel_multiplier_;
+      twist_msg.twist.angular.y =
+        scaleSpaceMouseAxis(msg.angular.y, spacemouse_sign_pitch_, spacemouse_max_wy_) *
+        haptic_ori_multiplier_ * haptic_ang_vel_multiplier_;
+      twist_msg.twist.angular.z =
+        scaleSpaceMouseAxis(msg.angular.z, spacemouse_sign_yaw_, spacemouse_max_wz_) *
+        haptic_ori_multiplier_ * haptic_ang_vel_multiplier_;
+    }
+    else
+    {
+      twist_msg.twist.angular.x = 0.0;
+      twist_msg.twist.angular.y = 0.0;
+      twist_msg.twist.angular.z = 0.0;
+    }
 
     twist_pub_->publish(twist_msg);
   }
@@ -880,6 +1012,22 @@ private:
   double max_vx_;
   double max_vy_;
   double max_vz_;
+  double spacemouse_deadzone_;
+  int spacemouse_timeout_ms_;
+  int ps4_override_hold_ms_;
+  double spacemouse_max_vx_;
+  double spacemouse_max_vy_;
+  double spacemouse_max_vz_;
+  bool spacemouse_enable_rotation_;
+  double spacemouse_max_wx_;
+  double spacemouse_max_wy_;
+  double spacemouse_max_wz_;
+  double spacemouse_sign_x_;
+  double spacemouse_sign_y_;
+  double spacemouse_sign_z_;
+  double spacemouse_sign_roll_;
+  double spacemouse_sign_pitch_;
+  double spacemouse_sign_yaw_;
   double haptic_pos_multiplier_;
   double haptic_ori_multiplier_;
   double haptic_lin_vel_multiplier_;
@@ -891,6 +1039,7 @@ private:
   std::string twist_frame_id_;
   std::string teleop_control_topic_;
   std::string teleop_action_name_;
+  std::string spacemouse_topic_name_;
   int teleop_mode_;
   std::string teleop_ee_name_;
   bool teleop_move_orientation_;
@@ -924,11 +1073,16 @@ private:
   uint32_t num_valid_episodes_{0};
 
   std::vector<int32_t> prev_buttons_;
+  geometry_msgs::msg::Twist last_spacemouse_msg_;
   rclcpp::Time last_joint_state_stamp_{0, 0, RCL_ROS_TIME};
   rclcpp::Time last_joint_state_receive_time_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time last_spacemouse_time_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time last_ps4_motion_time_{0, 0, RCL_ROS_TIME};
+  bool have_spacemouse_msg_{false};
 
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr spacemouse_sub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr episode_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt32>::SharedPtr num_valid_episodes_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr teleop_pub_;

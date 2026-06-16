@@ -66,10 +66,22 @@ ps4_input_manager:
     left_stick_y_idx: 1
     right_stick_y_idx: 4
 
+    spacemouse_topic_name: "/spacemouse_cmd"
+
     deadzone: 0.08
+    spacemouse_deadzone: 0.08
+    spacemouse_timeout_ms: 200
+    ps4_override_hold_ms: 300
+
     max_vx: 0.08
     max_vy: 0.08
     max_vz: 0.05
+
+    spacemouse_max_vx: 0.03
+    spacemouse_max_vy: 0.03
+    spacemouse_max_vz: 0.02
+
+    spacemouse_enable_rotation: true
 
     haptic_pos_multiplier: 2.0
     haptic_lin_vel_multiplier: 1.0
