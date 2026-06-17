@@ -128,13 +128,21 @@ gripper_manager:
     gripper_command_topic: "/teleop/gripper_cmd"
     gripper_inhibit_topic: "/teleop/gripper_inhibit"
     teleop_control_topic: "/teleop/control"
-    gripper_action_name: "/right_franka_gripper/move"
+    gripper_move_action_name: "/right_franka_gripper/move"
+    gripper_grasp_action_name: "/right_franka_gripper/grasp"
 
     gripper_speed: 0.05
     gripper_open_width: 0.080
-    gripper_close_width: 0.06 #0.026 for Sohyeon's peg
+    use_grasp_for_close: true
+    gripper_close_width: 0.045
     gripper_command_epsilon: 0.001
     min_command_interval_sec: 0.5
+
+    gripper_grasp_width: 0.045
+    gripper_grasp_force: 60.0
+    gripper_grasp_epsilon_inner: 0.001
+    gripper_grasp_epsilon_outer: 0.001
+    command_epsilon: 0.002
 
     allow_gripper_without_teleop: false
     enable_deprecated_width_topic: false
