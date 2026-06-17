@@ -3,6 +3,7 @@
 import sys
 import time
 import threading
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
@@ -635,7 +636,7 @@ class TeleopDashboardNode(Node):
         self.declare_parameter("event_frame_mono_topic", EVENT_FRAME_MONO_TOPIC)
         self.declare_parameter("event_frame_3ch_topic", EVENT_FRAME_3CH_TOPIC)
         self.declare_parameter("selected_event_frame_visualization", DEFAULT_EVENT_FRAME_VISUALIZATION)
-        self.declare_parameter("overlay_hdf5_path", "/home/jau/dyros/src/fr3_teleop/helpers/overlay_ref.hdf5")
+        self.declare_parameter("overlay_hdf5_path", "/home/jau/dyros/src/fr3_teleop/assets/pih_ref.jpg")
         self.declare_parameter("overlay_data_path", "/observations/images/rgb")
         self.declare_parameter("overlay_frame_index", 0)
         self.declare_parameter("overlay_alpha", 0.5)
@@ -719,7 +720,7 @@ class TeleopDashboardNode(Node):
         self.get_logger().info(f"Event frame mono topic: {self.event_frame_mono_topic}")
         self.get_logger().info(f"Event frame 3-channel topic: {self.event_frame_3ch_topic}")
         self.get_logger().info(f"Selected event frame visualization: {self.selected_event_frame_visualization}")
-        self.get_logger().info(f"Overlay HDF5 path: {self.overlay_hdf5_path}")
+        self.get_logger().info(f"Overlay path: {self.overlay_hdf5_path}")
         self.get_logger().info(f"Overlay data path: {self.overlay_data_path}")
         self.get_logger().info(f"Overlay frame index: {self.overlay_frame_index}")
         self.get_logger().info(f"Overlay alpha: {self.overlay_alpha:.3f}")
@@ -737,56 +738,124 @@ class TeleopDashboardNode(Node):
     def _load_overlay_reference_image(self):
         if not self.overlay_hdf5_path:
             self.overlay_ref_bgr = None
-            self.overlay_status_text = "Overlay disabled (no HDF5 configured)."
+            self.overlay_status_text = "Overlay disabled (no overlay path configured)."
             return
 
         try:
-            with h5py.File(self.overlay_hdf5_path, "r") as f:
-                if self.overlay_data_path not in f:
-                    raise KeyError(
-                        f"Data path '{self.overlay_data_path}' not found in {self.overlay_hdf5_path}"
-                    )
+            overlay_path = self.overlay_hdf5_path
+            overlay_path_obj = Path(overlay_path)
+            lower_path = overlay_path.lower()
 
-                data = f[self.overlay_data_path]
-                if data.ndim == 4:
-                    frame_idx = min(self.overlay_frame_index, data.shape[0] - 1)
-                    img = data[frame_idx]
-                elif data.ndim == 3:
-                    frame_idx = 0
-                    img = data[...]
+            if lower_path.endswith((".jpg", ".jpeg", ".png")):
+                ref_bgr = cv2.imread(overlay_path, cv2.IMREAD_COLOR)
+                if ref_bgr is None:
+                    raise ValueError(f"Failed to read overlay image: {overlay_path}")
+                source_desc = f"{overlay_path}"
+            elif lower_path.endswith((".hdf5", ".h5")):
+                # If a same-basename image exists next to the HDF5, prefer it.
+                paired_img_path = None
+                for ext in (".jpg", ".jpeg", ".png"):
+                    candidate = overlay_path_obj.with_suffix(ext)
+                    if candidate.exists():
+                        paired_img_path = candidate
+                        break
+
+                if paired_img_path is not None:
+                    ref_bgr = cv2.imread(str(paired_img_path), cv2.IMREAD_COLOR)
+                    if ref_bgr is None:
+                        raise ValueError(f"Failed to read overlay image: {paired_img_path}")
+                    source_desc = f"{paired_img_path} (paired with {overlay_path})"
                 else:
-                    raise ValueError(f"Unsupported image shape: {data.shape}")
+                    with h5py.File(overlay_path, "r") as f:
+                        if self.overlay_data_path not in f:
+                            raise KeyError(
+                                f"Data path '{self.overlay_data_path}' not found in {overlay_path}"
+                            )
 
-            img = np.asarray(img)
+                        data = f[self.overlay_data_path]
+                        if data.ndim == 4:
+                            frame_idx = min(self.overlay_frame_index, data.shape[0] - 1)
+                            img = data[frame_idx]
+                        elif data.ndim == 3:
+                            frame_idx = 0
+                            img = data[...]
+                        else:
+                            raise ValueError(f"Unsupported image shape: {data.shape}")
 
-            if img.ndim == 3 and img.shape[0] in (1, 3, 4) and img.shape[-1] not in (1, 3, 4):
-                img = np.transpose(img, (1, 2, 0))
+                    img = np.asarray(img)
 
-            if np.issubdtype(img.dtype, np.floating):
-                if img.max() <= 1.0:
-                    img = img * 255.0
-                img = np.clip(img, 0, 255).astype(np.uint8)
+                    if img.ndim == 3 and img.shape[0] in (1, 3, 4) and img.shape[-1] not in (1, 3, 4):
+                        img = np.transpose(img, (1, 2, 0))
+
+                    if np.issubdtype(img.dtype, np.floating):
+                        if img.max() <= 1.0:
+                            img = img * 255.0
+                        img = np.clip(img, 0, 255).astype(np.uint8)
+                    else:
+                        img = img.astype(np.uint8)
+
+                    if img.ndim == 2:
+                        ref_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                    elif img.shape[2] == 1:
+                        ref_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                    elif img.shape[2] == 3:
+                        # Match overlay.py behavior: assume HDF5 image is RGB.
+                        ref_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                    elif img.shape[2] == 4:
+                        ref_bgr = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+                    else:
+                        raise ValueError(f"Unsupported channel count: {img.shape}")
+
+                    source_desc = f"{overlay_path} [{self.overlay_data_path}] frame {frame_idx}"
             else:
-                img = img.astype(np.uint8)
+                with h5py.File(overlay_path, "r") as f:
+                    if self.overlay_data_path not in f:
+                        raise KeyError(
+                            f"Data path '{self.overlay_data_path}' not found in {overlay_path}"
+                        )
 
-            if img.ndim == 2:
-                ref_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-            elif img.shape[2] == 1:
-                ref_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-            elif img.shape[2] == 3:
-                # Match overlay.py behavior: assume HDF5 image is RGB.
-                ref_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            elif img.shape[2] == 4:
-                ref_bgr = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
-            else:
-                raise ValueError(f"Unsupported channel count: {img.shape}")
+                    data = f[self.overlay_data_path]
+                    if data.ndim == 4:
+                        frame_idx = min(self.overlay_frame_index, data.shape[0] - 1)
+                        img = data[frame_idx]
+                    elif data.ndim == 3:
+                        frame_idx = 0
+                        img = data[...]
+                    else:
+                        raise ValueError(f"Unsupported image shape: {data.shape}")
+
+                img = np.asarray(img)
+
+                if img.ndim == 3 and img.shape[0] in (1, 3, 4) and img.shape[-1] not in (1, 3, 4):
+                    img = np.transpose(img, (1, 2, 0))
+
+                if np.issubdtype(img.dtype, np.floating):
+                    if img.max() <= 1.0:
+                        img = img * 255.0
+                    img = np.clip(img, 0, 255).astype(np.uint8)
+                else:
+                    img = img.astype(np.uint8)
+
+                if img.ndim == 2:
+                    ref_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                elif img.shape[2] == 1:
+                    ref_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                elif img.shape[2] == 3:
+                    # Match overlay.py behavior: assume HDF5 image is RGB.
+                    ref_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                elif img.shape[2] == 4:
+                    ref_bgr = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+                else:
+                    raise ValueError(f"Unsupported channel count: {img.shape}")
+
+                source_desc = f"{overlay_path} [{self.overlay_data_path}] frame {frame_idx}"
 
             if self.overlay_rotate_ref_180:
                 ref_bgr = cv2.rotate(ref_bgr, cv2.ROTATE_180)
 
             self.overlay_ref_bgr = ref_bgr
             self.overlay_status_text = (
-                f"Overlay ready: {self.overlay_hdf5_path} [{self.overlay_data_path}] frame {frame_idx}, "
+                f"Overlay ready: {source_desc}, "
                 f"alpha={self.overlay_alpha:.2f}"
             )
 

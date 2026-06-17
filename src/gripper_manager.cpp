@@ -47,6 +47,7 @@ public:
     gripper_grasp_epsilon_outer_ = this->declare_parameter<double>("gripper_grasp_epsilon_outer", 0.020);
     gripper_grasp_force_ = this->declare_parameter<double>("gripper_grasp_force", 40.0);
     min_command_interval_sec_ = this->declare_parameter<double>("min_command_interval_sec", 0.5);
+    move_close_assumed_done_sec_ = this->declare_parameter<double>("move_close_assumed_done_sec", 0.75);
     allow_gripper_without_teleop_ = this->declare_parameter<bool>("allow_gripper_without_teleop", false);
     enable_deprecated_width_topic_ = this->declare_parameter<bool>("enable_deprecated_width_topic", false);
 
@@ -94,6 +95,7 @@ public:
     RCLCPP_INFO(this->get_logger(), "Gripper close mode: %s", use_grasp_for_close_ ? "GRASP" : "MOVE");
     RCLCPP_INFO(this->get_logger(), "Gripper grasp width: %.3f  epsilon_inner=%.3f  epsilon_outer=%.3f  force=%.1f N",
       gripper_grasp_width_, gripper_grasp_epsilon_inner_, gripper_grasp_epsilon_outer_, gripper_grasp_force_);
+    RCLCPP_INFO(this->get_logger(), "MOVE close assumed-done timeout: %.3f sec", move_close_assumed_done_sec_);
     RCLCPP_INFO(this->get_logger(), "allow_gripper_without_teleop: %s", allow_gripper_without_teleop_ ? "true" : "false");
   }
 
@@ -135,6 +137,7 @@ private:
     double new_gripper_grasp_epsilon_outer = gripper_grasp_epsilon_outer_;
     double new_command_epsilon = command_epsilon_;
     double new_min_command_interval_sec = min_command_interval_sec_;
+    double new_move_close_assumed_done_sec = move_close_assumed_done_sec_;
     bool new_allow_gripper_without_teleop = allow_gripper_without_teleop_;
     bool tuning_changed = false;
 
@@ -297,6 +300,22 @@ private:
         new_min_command_interval_sec = value;
         tuning_changed = true;
       }
+      else if (name == "move_close_assumed_done_sec")
+      {
+        double value = 0.0;
+        if (!get_numeric_param(param, value))
+        {
+          return result;
+        }
+        if (!std::isfinite(value) || value <= 0.0)
+        {
+          result.successful = false;
+          result.reason = "move_close_assumed_done_sec must be finite and > 0";
+          return result;
+        }
+        new_move_close_assumed_done_sec = value;
+        tuning_changed = true;
+      }
       else if (name == "allow_gripper_without_teleop")
       {
         if (param.get_type() != rclcpp::ParameterType::PARAMETER_BOOL)
@@ -331,15 +350,16 @@ private:
     gripper_grasp_epsilon_outer_ = new_gripper_grasp_epsilon_outer;
     command_epsilon_ = new_command_epsilon;
     min_command_interval_sec_ = new_min_command_interval_sec;
+    move_close_assumed_done_sec_ = new_move_close_assumed_done_sec;
     allow_gripper_without_teleop_ = new_allow_gripper_without_teleop;
 
     if (tuning_changed)
     {
       RCLCPP_INFO(this->get_logger(),
-        "Updated gripper tuning: speed=%.3f open_width=%.3f close_width=%.3f close_mode=%s grasp_width=%.3f force=%.1f eps_inner=%.3f eps_outer=%.3f cmd_eps=%.6f min_interval=%.3f allow_without_teleop=%s",
+        "Updated gripper tuning: speed=%.3f open_width=%.3f close_width=%.3f close_mode=%s grasp_width=%.3f force=%.1f eps_inner=%.3f eps_outer=%.3f cmd_eps=%.6f min_interval=%.3f move_close_assumed_done_sec=%.3f allow_without_teleop=%s",
         gripper_speed_, gripper_open_width_, gripper_close_width_, use_grasp_for_close_ ? "GRASP" : "MOVE", gripper_grasp_width_, gripper_grasp_force_,
         gripper_grasp_epsilon_inner_, gripper_grasp_epsilon_outer_, command_epsilon_,
-        min_command_interval_sec_, allow_gripper_without_teleop_ ? "true" : "false");
+        min_command_interval_sec_, move_close_assumed_done_sec_, allow_gripper_without_teleop_ ? "true" : "false");
     }
 
     return result;
@@ -386,7 +406,7 @@ private:
     }
     else
     {
-      sent = sendMoveCommand(gripper_open_width_, "state", "open");
+      sent = sendMoveCommand(gripper_open_width_, "state", "open", true);
     }
     if (sent)
     {
@@ -410,7 +430,7 @@ private:
 
   // Returns false (and logs) if any shared guard rejects the command.
   // width_for_log is used only for log messages; pass NaN for grasp commands.
-  bool commonCommandGuards(const char * source, const char * state_name, double width_for_log)
+  bool commonCommandGuards(const char * source, const char * state_name, double width_for_log, bool ignore_goal_active)
   {
     if (gripper_inhibited_)
     {
@@ -434,7 +454,7 @@ private:
       return false;
     }
 
-    if (goal_active_)
+    if (goal_active_ && !ignore_goal_active)
     {
       RCLCPP_INFO_THROTTLE(
         this->get_logger(),
@@ -463,7 +483,7 @@ private:
     return true;
   }
 
-  bool sendMoveCommand(double requested_width, const char * source, const char * state_name)
+  bool sendMoveCommand(double requested_width, const char * source, const char * state_name, bool allow_goal_active = false)
   {
     if (!std::isfinite(requested_width))
     {
@@ -472,7 +492,7 @@ private:
       return false;
     }
 
-    if (!commonCommandGuards(source, state_name, requested_width))
+    if (!commonCommandGuards(source, state_name, requested_width, allow_goal_active))
     {
       return false;
     }
@@ -503,27 +523,50 @@ private:
       return false;
     }
 
+    close_move_assumed_done_pending_ = false;
+    if (move_close_assumed_done_timer_)
+    {
+      move_close_assumed_done_timer_->cancel();
+    }
+
     GripperMove::Goal goal;
     goal.width = clamped_width;
     goal.speed = gripper_speed_;
 
+    const bool is_close_move = (!allow_goal_active && state_name != nullptr && std::string(state_name) == "closed");
+    const uint64_t goal_token = ++next_goal_token_;
+    pending_goal_token_ = goal_token;
+    active_goal_token_ = goal_token;
+
     rclcpp_action::Client<GripperMove>::SendGoalOptions options;
     options.goal_response_callback =
-      [this, width = clamped_width, src = std::string(source), state = std::string(state_name)](
+      [this, width = clamped_width, src = std::string(source), state = std::string(state_name), is_close_move, goal_token](
         const GripperMoveGoalHandle::SharedPtr & handle)
       {
         if (!handle)
         {
-          goal_active_ = false;
+          if (goal_token == active_goal_token_)
+          {
+            goal_active_ = false;
+            close_move_assumed_done_pending_ = false;
+          }
           RCLCPP_WARN(this->get_logger(),
             "Gripper MOVE goal rejected [source=%s state=%s].", src.c_str(), state.c_str());
         }
         else
         {
+          if (goal_token != active_goal_token_)
+          {
+            return;
+          }
           last_sent_width_ = width;
           has_last_sent_width_ = true;
           // A successful move/open clears grasp-duplicate state so a later close can GRASP again.
           has_last_sent_grasp_ = false;
+          if (is_close_move)
+          {
+            startCloseMoveAssumedDoneTimer(goal_token);
+          }
           RCLCPP_INFO(this->get_logger(),
             "Gripper MOVE goal accepted [source=%s state=%s width=%.3f speed=%.3f]",
             src.c_str(), state.c_str(), width, gripper_speed_);
@@ -531,9 +574,19 @@ private:
       };
 
     options.result_callback =
-      [this](const GripperMoveGoalHandle::WrappedResult & result)
+      [this, goal_token](const GripperMoveGoalHandle::WrappedResult & result)
       {
+        if (goal_token != active_goal_token_)
+        {
+          return;
+        }
+
         goal_active_ = false;
+        close_move_assumed_done_pending_ = false;
+        if (move_close_assumed_done_timer_)
+        {
+          move_close_assumed_done_timer_->cancel();
+        }
         switch (result.code)
         {
           case rclcpp_action::ResultCode::SUCCEEDED:
@@ -573,7 +626,7 @@ private:
       return false;
     }
 
-    if (!commonCommandGuards(source, state_name, gripper_grasp_width_))
+    if (!commonCommandGuards(source, state_name, gripper_grasp_width_, false))
     {
       return false;
     }
@@ -594,6 +647,12 @@ private:
       return false;
     }
 
+    close_move_assumed_done_pending_ = false;
+    if (move_close_assumed_done_timer_)
+    {
+      move_close_assumed_done_timer_->cancel();
+    }
+
     GripperGrasp::Goal goal;
     goal.width = clampWidth(gripper_grasp_width_);
     goal.speed = gripper_speed_;
@@ -601,19 +660,31 @@ private:
     goal.epsilon.inner = gripper_grasp_epsilon_inner_;
     goal.epsilon.outer = gripper_grasp_epsilon_outer_;
 
+    const uint64_t goal_token = ++next_goal_token_;
+    pending_goal_token_ = goal_token;
+    active_goal_token_ = goal_token;
+
     rclcpp_action::Client<GripperGrasp>::SendGoalOptions options;
     options.goal_response_callback =
-      [this, src = std::string(source), state = std::string(state_name)](
+      [this, src = std::string(source), state = std::string(state_name), goal_token](
         const GripperGraspGoalHandle::SharedPtr & handle)
       {
         if (!handle)
         {
-          goal_active_ = false;
+          if (goal_token == active_goal_token_)
+          {
+            goal_active_ = false;
+            close_move_assumed_done_pending_ = false;
+          }
           RCLCPP_WARN(this->get_logger(),
             "Gripper GRASP goal rejected [source=%s state=%s].", src.c_str(), state.c_str());
         }
         else
         {
+          if (goal_token != active_goal_token_)
+          {
+            return;
+          }
           has_last_sent_grasp_ = true;
           // A grasp invalidates the previous move-width duplicate filter.
           has_last_sent_width_ = false;
@@ -626,9 +697,15 @@ private:
       };
 
     options.result_callback =
-      [this](const GripperGraspGoalHandle::WrappedResult & result)
+      [this, goal_token](const GripperGraspGoalHandle::WrappedResult & result)
       {
+        if (goal_token != active_goal_token_)
+        {
+          return;
+        }
+
         goal_active_ = false;
+        close_move_assumed_done_pending_ = false;
         switch (result.code)
         {
           case rclcpp_action::ResultCode::SUCCEEDED:
@@ -654,6 +731,38 @@ private:
     return true;
   }
 
+  void startCloseMoveAssumedDoneTimer(uint64_t goal_token)
+  {
+    if (move_close_assumed_done_timer_)
+    {
+      move_close_assumed_done_timer_->cancel();
+    }
+
+    close_move_assumed_done_pending_ = true;
+    move_close_assumed_done_timer_ = this->create_wall_timer(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(move_close_assumed_done_sec_)),
+      [this, goal_token]()
+      {
+        if (!close_move_assumed_done_pending_ || goal_token != active_goal_token_)
+        {
+          if (move_close_assumed_done_timer_)
+          {
+            move_close_assumed_done_timer_->cancel();
+          }
+          return;
+        }
+
+        RCLCPP_WARN(this->get_logger(),
+          "Assuming MOVE close done after timeout; allowing future gripper commands");
+        goal_active_ = false;
+        close_move_assumed_done_pending_ = false;
+        if (move_close_assumed_done_timer_)
+        {
+          move_close_assumed_done_timer_->cancel();
+        }
+      });
+  }
+
   std::string gripper_state_command_topic_;
   std::string gripper_command_topic_; 
   std::string gripper_inhibit_topic_;
@@ -669,6 +778,7 @@ private:
   double gripper_grasp_epsilon_outer_;
   double gripper_grasp_force_;
   double min_command_interval_sec_;
+  double move_close_assumed_done_sec_;
   double command_epsilon_ = 1e-3;
   bool has_last_sent_width_ = false;
   double last_sent_width_ = 0.0;
@@ -683,6 +793,10 @@ private:
   bool teleop_enabled_{false};
   bool allow_gripper_without_teleop_{false};
   bool enable_deprecated_width_topic_{false};
+  bool close_move_assumed_done_pending_{false};
+  uint64_t next_goal_token_{0};
+  uint64_t pending_goal_token_{0};
+  uint64_t active_goal_token_{0};
 
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr gripper_state_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr gripper_inhibit_sub_;
@@ -690,6 +804,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr deprecated_gripper_width_sub_;
   rclcpp_action::Client<GripperMove>::SharedPtr gripper_move_client_;
   rclcpp_action::Client<GripperGrasp>::SharedPtr gripper_grasp_client_;
+  rclcpp::TimerBase::SharedPtr move_close_assumed_done_timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 };
 

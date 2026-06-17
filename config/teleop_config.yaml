@@ -40,6 +40,7 @@ record_manager:
 
 teleop_dashboard:
   ros__parameters:
+    overlay_hdf5_path: "/home/jau/dyros/src/fr3_teleop/assets/pih_ref.jpg"
     event_frame_mono_topic: "/openmv_cam/image"
     event_frame_3ch_topic: "/openmv_cam/event_frame_3ch"
     episode_control_topic: "/episode/control"
@@ -111,13 +112,21 @@ ps4_input_manager:
       - "right_fr3_joint7"
 
     home_joint_positions:
-      - -0.00
-      - -0.17894121136367586
-      - 0.0
-      - -2.7817434397297225
-      - 0.00
-      - 2.62409615716241
-      - 0.7714418627146631
+      - -0.00  # right_fr3_joint1
+      - -0.8423077682863201      # right_fr3_joint2
+      - 0.00   # right_fr3_joint3
+      - -2.7754953819074073      # right_fr3_joint4
+      - 0.005073427092282165     # right_fr3_joint5
+      - 1.9440275651964238       # right_fr3_joint6
+      - 0.7781559753053718       # right_fr3_joint7
+      # for ball into ring
+      # - -0.00
+      # - -0.17894121136367586
+      # - 0.0
+      # - -2.7817434397297225
+      # - 0.00
+      # - 2.62409615716241
+      # - 0.7714418627146631
 
     home_vel_scale: 0.1
     home_acc_scale: 0.1
@@ -131,17 +140,20 @@ gripper_manager:
     gripper_move_action_name: "/right_franka_gripper/move"
     gripper_grasp_action_name: "/right_franka_gripper/grasp"
 
-    gripper_speed: 0.05
-    gripper_open_width: 0.080
+
     use_grasp_for_close: true
-    gripper_close_width: 0.045
+
+    gripper_speed: 0.1
+    gripper_open_width: 0.080
+    gripper_close_width: 0.048
     gripper_command_epsilon: 0.001
     min_command_interval_sec: 0.5
+    move_close_assumed_done_sec: 0.75
 
-    gripper_grasp_width: 0.045
-    gripper_grasp_force: 60.0
-    gripper_grasp_epsilon_inner: 0.001
-    gripper_grasp_epsilon_outer: 0.001
+    gripper_grasp_width: 0.0
+    gripper_grasp_force: 30.0
+    gripper_grasp_epsilon_inner: 0.08
+    gripper_grasp_epsilon_outer: 0.08
     command_epsilon: 0.002
 
     allow_gripper_without_teleop: false
