@@ -55,6 +55,13 @@ teleop_dashboard:
     start_raw_event_recording_service: "/openmv_cam/start_raw_event_recording"
     stop_raw_event_recording_service: "/openmv_cam/stop_raw_event_recording"
 
+spacemouse_publisher:
+  ros__parameters:
+    enable_buttons: true
+    button_topic_name: "/spacemouse_buttons"
+    hidraw_vendor_id: "256f"
+    hidraw_product_id: "c635"
+
 ps4_input_manager:
   ros__parameters:
     button_gripper_open: 2
@@ -69,20 +76,27 @@ ps4_input_manager:
 
     spacemouse_topic_name: "/spacemouse_cmd"
 
+    enable_spacemouse_buttons: true
+    spacemouse_button_topic_name: "/spacemouse_buttons"
+    spacemouse_button_gripper_open: 0
+    spacemouse_button_gripper_close: 1
+
     deadzone: 0.08
-    spacemouse_deadzone: 0.08
-    spacemouse_timeout_ms: 200
     ps4_override_hold_ms: 300
 
     max_vx: 0.08
     max_vy: 0.08
     max_vz: 0.05
 
-    spacemouse_max_vx: 0.03
-    spacemouse_max_vy: 0.03
-    spacemouse_max_vz: 0.02
-
+    spacemouse_deadzone: 0.15
+    spacemouse_timeout_ms: 80
+    spacemouse_max_vx: 0.015
+    spacemouse_max_vy: 0.015
+    spacemouse_max_vz: 0.010
     spacemouse_enable_rotation: true
+
+    translation_sensitivity: 2.0
+    rotation_sensitivity: 1.0
 
     haptic_pos_multiplier: 2.0
     haptic_lin_vel_multiplier: 1.0
@@ -96,7 +110,7 @@ ps4_input_manager:
     teleop_action_name: "/cartesian_executor"
     teleop_mode: 0
     teleop_ee_name: "right_fr3_hand_tcp"
-    teleop_move_orientation: false
+    teleop_move_orientation: true
 
     gripper_state_command_topic: "/teleop/gripper_state_cmd"
 

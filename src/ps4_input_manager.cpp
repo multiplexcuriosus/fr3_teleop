@@ -85,6 +85,13 @@ public:
     teleop_move_orientation_ = this->declare_parameter<bool>("teleop_move_orientation", false);
     spacemouse_topic_name_ = this->declare_parameter<std::string>("spacemouse_topic_name", "/spacemouse_cmd");
 
+    // SpaceMouse button handling
+    enable_spacemouse_buttons_ = this->declare_parameter<bool>("enable_spacemouse_buttons", true);
+    spacemouse_button_topic_name_ = this->declare_parameter<std::string>(
+        "spacemouse_button_topic_name", "/spacemouse_buttons");
+    spacemouse_button_gripper_open_ = this->declare_parameter<int>("spacemouse_button_gripper_open", 0);
+    spacemouse_button_gripper_close_ = this->declare_parameter<int>("spacemouse_button_gripper_close", 1);
+
     // Action names
     home_action_name_ = this->declare_parameter<std::string>(
         "home_action_name", "/fr3_move_to_joint");
@@ -133,6 +140,14 @@ public:
     spacemouse_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
       spacemouse_topic_name_, 10,
       std::bind(&Ps4InputManager::spacemouseCallback, this, std::placeholders::_1));
+    
+    // SpaceMouse button subscription (if enabled)
+    if (enable_spacemouse_buttons_)
+    {
+      spacemouse_buttons_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
+          spacemouse_button_topic_name_, command_qos,
+          std::bind(&Ps4InputManager::spacemouseButtonsCallback, this, std::placeholders::_1));
+    }
 
     teleop_client_ = rclcpp_action::create_client<TeleopAction>(this, teleop_action_name_);
     home_client_ = rclcpp_action::create_client<HomeAction>(this, home_action_name_);
@@ -147,6 +162,16 @@ public:
     RCLCPP_INFO(this->get_logger(), "SpaceMouse topic: %s", spacemouse_topic_name_.c_str());
     RCLCPP_INFO(this->get_logger(), "SpaceMouse timeout (ms): %d", spacemouse_timeout_ms_);
     RCLCPP_INFO(this->get_logger(), "SpaceMouse rotation enabled: %s", spacemouse_enable_rotation_ ? "true" : "false");
+    if (enable_spacemouse_buttons_)
+    {
+      RCLCPP_INFO(this->get_logger(), "SpaceMouse buttons enabled on topic: %s", spacemouse_button_topic_name_.c_str());
+      RCLCPP_INFO(this->get_logger(), "  Button %d = gripper OPEN, Button %d = gripper CLOSE",
+                  spacemouse_button_gripper_open_, spacemouse_button_gripper_close_);
+    }
+    else
+    {
+      RCLCPP_INFO(this->get_logger(), "SpaceMouse buttons are disabled");
+    }
     publishNumValidEpisodes();
     publishGripperInhibit(true);
   }
@@ -204,6 +229,54 @@ private:
     last_spacemouse_msg_ = *msg;
     last_spacemouse_time_ = this->now();
     have_spacemouse_msg_ = true;
+  }
+
+  bool spacemouseButtonRisingEdge(uint8_t current_mask, int button_idx) const
+  {
+    const uint8_t current_bit = (current_mask >> button_idx) & 0x01;
+    const uint8_t prev_bit = (prev_spacemouse_button_mask_ >> button_idx) & 0x01;
+    return (current_bit == 1 && prev_bit == 0);
+  }
+
+  void spacemouseButtonsCallback(const std_msgs::msg::UInt8::SharedPtr msg)
+  {
+    const uint8_t current_mask = msg->data;
+
+    // Check for gripper open button rising edge
+    if (spacemouseButtonRisingEdge(current_mask, spacemouse_button_gripper_open_))
+    {
+      if (!teleop_session_enabled_)
+      {
+        RCLCPP_WARN(this->get_logger(), "Ignoring SpaceMouse gripper open: teleop session is not enabled.");
+      }
+      else if (gripperBlockedByTransition())
+      {
+        RCLCPP_WARN(this->get_logger(), "Ignoring SpaceMouse gripper open: teleop/home transition is active.");
+      }
+      else
+      {
+        publishGripperStateCommand(false);
+      }
+    }
+
+    // Check for gripper close button rising edge
+    if (spacemouseButtonRisingEdge(current_mask, spacemouse_button_gripper_close_))
+    {
+      if (!teleop_session_enabled_)
+      {
+        RCLCPP_WARN(this->get_logger(), "Ignoring SpaceMouse gripper close: teleop session is not enabled.");
+      }
+      else if (gripperBlockedByTransition())
+      {
+        RCLCPP_WARN(this->get_logger(), "Ignoring SpaceMouse gripper close: teleop/home transition is active.");
+      }
+      else
+      {
+        publishGripperStateCommand(true);
+      }
+    }
+
+    prev_spacemouse_button_mask_ = current_mask;
   }
 
   bool isJointStateFresh() const
@@ -1080,9 +1153,17 @@ private:
   rclcpp::Time last_ps4_motion_time_{0, 0, RCL_ROS_TIME};
   bool have_spacemouse_msg_{false};
 
+  // SpaceMouse button handling
+  bool enable_spacemouse_buttons_{true};
+  std::string spacemouse_button_topic_name_;
+  int spacemouse_button_gripper_open_{0};
+  int spacemouse_button_gripper_close_{1};
+  uint8_t prev_spacemouse_button_mask_{0};
+
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr spacemouse_sub_;
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr spacemouse_buttons_sub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr episode_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt32>::SharedPtr num_valid_episodes_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr teleop_pub_;
