@@ -636,7 +636,7 @@ class TeleopDashboardNode(Node):
         self.declare_parameter("event_frame_mono_topic", EVENT_FRAME_MONO_TOPIC)
         self.declare_parameter("event_frame_3ch_topic", EVENT_FRAME_3CH_TOPIC)
         self.declare_parameter("selected_event_frame_visualization", DEFAULT_EVENT_FRAME_VISUALIZATION)
-        self.declare_parameter("overlay_hdf5_path", "/home/jau/dyros/src/fr3_teleop/assets/pih_ref.jpg")
+        self.declare_parameter("overlay_hdf5_path", "")
         self.declare_parameter("overlay_data_path", "/observations/images/rgb")
         self.declare_parameter("overlay_frame_index", 0)
         self.declare_parameter("overlay_alpha", 0.5)

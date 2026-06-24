@@ -40,7 +40,7 @@ record_manager:
 
 teleop_dashboard:
   ros__parameters:
-    overlay_hdf5_path: "/home/jau/dyros/src/fr3_teleop/assets/pih_ref.jpg"
+    overlay_hdf5_path: "/home/jau/dyros/src/fr3_teleop/assets/pih_ref_ofe.jpg"
     event_frame_mono_topic: "/openmv_cam/image"
     event_frame_3ch_topic: "/openmv_cam/event_frame_3ch"
     episode_control_topic: "/episode/control"
@@ -88,15 +88,21 @@ ps4_input_manager:
     max_vy: 0.08
     max_vz: 0.05
 
-    spacemouse_deadzone: 0.15
+    spacemouse_deadzone: 0.0
     spacemouse_timeout_ms: 80
-    spacemouse_max_vx: 0.015
-    spacemouse_max_vy: 0.015
-    spacemouse_max_vz: 0.010
+    spacemouse_max_vx: 0.045
+    spacemouse_max_vy: 0.045
+    spacemouse_max_vz: 0.035
+
+    spacemouse_max_wx: 0.64
+    spacemouse_max_wy: 0.64
+    spacemouse_max_wz: 0.64
+
+
     spacemouse_enable_rotation: true
 
-    translation_sensitivity: 2.0
-    rotation_sensitivity: 1.0
+    translation_sensitivity: 2.5
+    rotation_sensitivity: 5.0
 
     haptic_pos_multiplier: 2.0
     haptic_lin_vel_multiplier: 1.0
@@ -126,13 +132,26 @@ ps4_input_manager:
       - "right_fr3_joint7"
 
     home_joint_positions:
-      - -0.00  # right_fr3_joint1
-      - -0.8423077682863201      # right_fr3_joint2
-      - 0.00   # right_fr3_joint3
-      - -2.7754953819074073      # right_fr3_joint4
-      - 0.005073427092282165     # right_fr3_joint5
-      - 1.9440275651964238       # right_fr3_joint6
-      - 0.7781559753053718       # right_fr3_joint7
+      - -0.11307370077073517 # 1
+      - -0.5780235358715815 # 2
+      - -0.125515130419747 # 3
+      - -2.6345995844121566 # 4
+      - -0.07698932141065598 #5
+      - 2.07024652434962 # 6
+      - 0.5979843918116214 # 7
+      
+      # for peg-in-hole, good rgb view      
+      # - -0.00  # right_fr3_joint1
+      # - -0.8423077682863201      # right_fr3_joint2
+      # - 0.00   # right_fr3_joint3
+      # - -2.7754953819074073      # right_fr3_joint4
+      # - 0.0    # right_fr3_joint5
+      # - 1.9440275651964238       # right_fr3_joint6
+      # - 0.7853981634       # right_fr3_joint7
+
+
+
+
       # for ball into ring
       # - -0.00
       # - -0.17894121136367586
