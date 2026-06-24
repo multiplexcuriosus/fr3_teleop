@@ -9,23 +9,7 @@ import os
 
 from fr3_teleop.config.teleop_config import (
     TOPICS_TO_RECORD,
-    DASHBOARD_PARAMS,
 )
-
-
-def _format_ros_arg_value(value):
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
-
-
-def _dashboard_ros_args(params):
-    args = ["--ros-args"]
-    for key, value in params.items():
-        if isinstance(value, (str, bool, int, float)):
-            args.extend(["-p", f"{key}:={_format_ros_arg_value(value)}"])
-    return args
-
 
 def generate_launch_description():
     pkg_share = get_package_share_directory("fr3_teleop")
@@ -33,8 +17,6 @@ def generate_launch_description():
     dashboard_script = "/home/jau/dyros/src/fr3_teleop/helpers/dashboard.py"
 
     print(f"[teleop.launch] Recording topics: {TOPICS_TO_RECORD}")
-    print(f"[teleop.launch] Dashboard event mono topic: {DASHBOARD_PARAMS['event_frame_mono_topic']}")
-    print(f"[teleop.launch] Dashboard event 3ch topic: {DASHBOARD_PARAMS['event_frame_3ch_topic']}")
 
     openmv_pkg_share = get_package_share_directory("openmv_cam")
     camera_launch_file = os.path.join(openmv_pkg_share, "launch", "both_cams.launch.py")
@@ -69,6 +51,26 @@ def generate_launch_description():
         default_value="/openmv_event_cam",
         description="ROS node name of the OpenMV event camera node",
     )
+    event_frame_mode_arg = DeclareLaunchArgument(
+        "event_frame_mode",
+        default_value="shifted",
+        description="Event frame mode for openmv_cam-node",
+    )
+    event_frame_ch0_ms_arg = DeclareLaunchArgument(
+        "event_frame_ch0_ms",
+        default_value="50.0",
+        description="Channel-0 frame integration window (ms) for openmv_cam-node",
+    )
+    event_frame_ch1_ms_arg = DeclareLaunchArgument(
+        "event_frame_ch1_ms",
+        default_value="250.0",
+        description="Channel-1 frame integration window (ms) for openmv_cam-node",
+    )
+    event_frame_ch2_ms_arg = DeclareLaunchArgument(
+        "event_frame_ch2_ms",
+        default_value="1500.0",
+        description="Channel-2 frame integration window (ms) for openmv_cam-node",
+    )
 
     no_cams = LaunchConfiguration("no_cams")
     bag_name = LaunchConfiguration("bag_name")
@@ -76,9 +78,13 @@ def generate_launch_description():
     prefix = LaunchConfiguration("prefix")
     record_raw_events = LaunchConfiguration("record_raw_events")
     openmv_node_name = LaunchConfiguration("openmv_node_name")
+    event_frame_mode = LaunchConfiguration("event_frame_mode")
+    event_frame_ch0_ms = LaunchConfiguration("event_frame_ch0_ms")
+    event_frame_ch1_ms = LaunchConfiguration("event_frame_ch1_ms")
+    event_frame_ch2_ms = LaunchConfiguration("event_frame_ch2_ms")
 
     dashboard_process = ExecuteProcess(
-        cmd=["python3", dashboard_script, *_dashboard_ros_args(DASHBOARD_PARAMS)],
+        cmd=["python3", dashboard_script, "--ros-args", "--params-file", teleop_config_yaml],
         output="screen",
     )
 
@@ -108,6 +114,10 @@ def generate_launch_description():
         prefix_arg,
         record_raw_events_arg,
         openmv_node_name_arg,
+        event_frame_mode_arg,
+        event_frame_ch0_ms_arg,
+        event_frame_ch1_ms_arg,
+        event_frame_ch2_ms_arg,
         record_manager_node,
         Node(
             package="joy",
@@ -132,6 +142,12 @@ def generate_launch_description():
         dashboard_process,
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(camera_launch_file),
+            launch_arguments={
+                "event_frame_mode": event_frame_mode,
+                "event_frame_ch0_ms": event_frame_ch0_ms,
+                "event_frame_ch1_ms": event_frame_ch1_ms,
+                "event_frame_ch2_ms": event_frame_ch2_ms,
+            }.items(),
             condition=UnlessCondition(no_cams),
         ),
     ])
