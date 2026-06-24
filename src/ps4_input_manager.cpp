@@ -845,8 +845,8 @@ private:
     twist_msg.header.frame_id = twist_frame_id_;
 
     twist_msg.twist.linear.x = ly * max_vx_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
-    twist_msg.twist.linear.y = -lx * max_vy_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
-    twist_msg.twist.linear.z = -ry * max_vz_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+    twist_msg.twist.linear.y = lx * max_vy_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
+    twist_msg.twist.linear.z = ry * max_vz_ * haptic_pos_multiplier_ * haptic_lin_vel_multiplier_;
 
     twist_msg.twist.angular.x = 0.0;
     twist_msg.twist.angular.y = 0.0;
