@@ -165,7 +165,7 @@ public:
     if (enable_spacemouse_buttons_)
     {
       RCLCPP_INFO(this->get_logger(), "SpaceMouse buttons enabled on topic: %s", spacemouse_button_topic_name_.c_str());
-      RCLCPP_INFO(this->get_logger(), "  Button %d = gripper OPEN, Button %d = gripper CLOSE",
+      RCLCPP_INFO(this->get_logger(), "  Button %d = gripper TOGGLE(open/close), Button %d = unused",
                   spacemouse_button_gripper_open_, spacemouse_button_gripper_close_);
     }
     else
@@ -242,37 +242,21 @@ private:
   {
     const uint8_t current_mask = msg->data;
 
-    // Check for gripper open button rising edge
+    // SpaceMouse gripper-open button now toggles open/close on each rising edge.
     if (spacemouseButtonRisingEdge(current_mask, spacemouse_button_gripper_open_))
     {
       if (!teleop_session_enabled_)
       {
-        RCLCPP_WARN(this->get_logger(), "Ignoring SpaceMouse gripper open: teleop session is not enabled.");
+        RCLCPP_WARN(this->get_logger(), "Ignoring SpaceMouse gripper toggle: teleop session is not enabled.");
       }
       else if (gripperBlockedByTransition())
       {
-        RCLCPP_WARN(this->get_logger(), "Ignoring SpaceMouse gripper open: teleop/home transition is active.");
+        RCLCPP_WARN(this->get_logger(), "Ignoring SpaceMouse gripper toggle: teleop/home transition is active.");
       }
       else
       {
-        publishGripperStateCommand(false);
-      }
-    }
-
-    // Check for gripper close button rising edge
-    if (spacemouseButtonRisingEdge(current_mask, spacemouse_button_gripper_close_))
-    {
-      if (!teleop_session_enabled_)
-      {
-        RCLCPP_WARN(this->get_logger(), "Ignoring SpaceMouse gripper close: teleop session is not enabled.");
-      }
-      else if (gripperBlockedByTransition())
-      {
-        RCLCPP_WARN(this->get_logger(), "Ignoring SpaceMouse gripper close: teleop/home transition is active.");
-      }
-      else
-      {
-        publishGripperStateCommand(true);
+        const bool next_closed_state = !current_gripper_closed_state_;
+        publishGripperStateCommand(next_closed_state);
       }
     }
 
