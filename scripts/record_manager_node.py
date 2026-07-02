@@ -23,7 +23,7 @@ class RecordManagerNode(Node):
 
         self.cb_group = ReentrantCallbackGroup()
 
-        self.declare_parameter("target_dir", "data/bags")
+        self.declare_parameter("target_dir", "/home/jau/data/bags/")
         self.declare_parameter("prefix", "")
         self.declare_parameter("bag_name", "")
 
@@ -45,9 +45,12 @@ class RecordManagerNode(Node):
         ])
         self.declare_parameter("topics_to_record", rclpy.Parameter.Type.STRING_ARRAY)
 
-        self.declare_parameter("bag_storage", "sqlite3")
+        self.declare_parameter("bag_storage", "mcap")
         self.declare_parameter("service_timeout_sec", 5.0)
-        self.declare_parameter("bag_shutdown_timeout_sec", 10.0)
+        self.declare_parameter("bag_shutdown_timeout_sec", 180.0)
+        self.declare_parameter("allow_force_kill_bag", False)
+        self.declare_parameter("bag_sigterm_timeout_sec", 30.0)
+        self.declare_parameter("bag_sigkill_timeout_sec", 10.0)
         self.declare_parameter("enforce_topic_presence", True)
         self.declare_parameter("debug_bypass_topic_presence", False)
 
@@ -95,6 +98,9 @@ class RecordManagerNode(Node):
 
     def _get_double_param(self, name):
         return self.get_parameter(name).get_parameter_value().double_value
+
+    def _get_int_or_double_param(self, name):
+        return float(self.get_parameter(name).get_parameter_value().double_value)
 
     def _get_str_array_param(self, name):
         return list(self.get_parameter(name).get_parameter_value().string_array_value)
@@ -277,6 +283,8 @@ class RecordManagerNode(Node):
         if bag_path.exists():
             raise RuntimeError(f"Bag path already exists: {bag_path}")
 
+        self.get_logger().info(f"rosbag storage backend: {storage}")
+
         cmd = [
             "ros2", "bag", "record",
             "-o", str(bag_path),
@@ -297,27 +305,48 @@ class RecordManagerNode(Node):
 
     def _stop_bag_recording(self):
         if self.bag_proc is None:
-            return
+            return True
 
-        timeout_sec = self._get_double_param("bag_shutdown_timeout_sec")
+        shutdown_timeout_sec = self._get_int_or_double_param("bag_shutdown_timeout_sec")
+        allow_force_kill_bag = self._get_bool_param("allow_force_kill_bag")
+        sigterm_timeout_sec = self._get_int_or_double_param("bag_sigterm_timeout_sec")
+        sigkill_timeout_sec = self._get_int_or_double_param("bag_sigkill_timeout_sec")
 
         if self.bag_proc.poll() is None:
             self.get_logger().info("Stopping rosbag with SIGINT")
             os.killpg(os.getpgid(self.bag_proc.pid), signal.SIGINT)
 
             try:
-                self.bag_proc.wait(timeout=timeout_sec)
+                self.bag_proc.wait(timeout=shutdown_timeout_sec)
+                self.bag_proc = None
+                return True
             except subprocess.TimeoutExpired:
+                if not allow_force_kill_bag:
+                    self.get_logger().error(
+                        "rosbag did not stop after SIGINT, but allow_force_kill_bag=False; leaving process alive to avoid bag corruption"
+                    )
+                    return False
+
                 self.get_logger().warn("rosbag did not stop after SIGINT; sending SIGTERM")
                 os.killpg(os.getpgid(self.bag_proc.pid), signal.SIGTERM)
                 try:
-                    self.bag_proc.wait(timeout=3.0)
+                    self.bag_proc.wait(timeout=sigterm_timeout_sec)
+                    self.bag_proc = None
+                    return True
                 except subprocess.TimeoutExpired:
                     self.get_logger().warn("rosbag did not stop after SIGTERM; sending SIGKILL")
                     os.killpg(os.getpgid(self.bag_proc.pid), signal.SIGKILL)
-                    self.bag_proc.wait(timeout=3.0)
+                    try:
+                        self.bag_proc.wait(timeout=sigkill_timeout_sec)
+                        self.bag_proc = None
+                        return True
+                    except subprocess.TimeoutExpired:
+                        self.get_logger().error("rosbag did not stop after SIGKILL")
+                        self.bag_proc = None
+                        return False
 
         self.bag_proc = None
+        return True
 
     def _handle_start_recording(self, request, response):
         del request
@@ -403,22 +432,16 @@ class RecordManagerNode(Node):
         self.get_logger().info(f"Rosbag: {self.current_bag_path}")
         self.get_logger().info(f"Raw event file: {self.current_raw_event_path}")
 
-        if self.bag_proc is None:
-            self.get_logger().warn("No active rosbag process")
-            # Still try to stop raw event recording if requested.
-            if record_raw_events:
-                try:
-                    self._call_trigger_service(stop_raw_service, service_timeout)
-                except Exception as e:
-                    self.get_logger().warn(f"stop_raw_event_recording failed: {e}")
-
-            response.success = False
-            response.message = ""
-            return response
-
         try:
-            # Stop bag first so episode/topic recording ends cleanly.
-            self._stop_bag_recording()
+            bag_stopped = self._stop_bag_recording()
+
+            if not bag_stopped:
+                response.success = False
+                response.message = (
+                    "rosbag did not finish closing within timeout; process left alive to avoid corrupting bag. "
+                    "Wait and inspect/stop manually."
+                )
+                return response
 
             if record_raw_events:
                 self._call_trigger_service(stop_raw_service, service_timeout)
@@ -444,7 +467,11 @@ class RecordManagerNode(Node):
         if self.bag_proc is not None and self.bag_proc.poll() is None:
             self.get_logger().warn("Node shutting down while recording is active")
             try:
-                self._stop_bag_recording()
+                bag_stopped = self._stop_bag_recording()
+                if not bag_stopped:
+                    self.get_logger().warn(
+                        "Bag process was intentionally left alive on shutdown to avoid corruption"
+                    )
             except Exception as e:
                 self.get_logger().warn(f"Failed to stop bag on shutdown: {e}")
 

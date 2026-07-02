@@ -33,7 +33,7 @@ def generate_launch_description():
     )
     target_dir_arg = DeclareLaunchArgument(
         "target_dir",
-        default_value="data/bags",
+        default_value="/home/jau/data/bags/",
         description="Directory where bags and raw-event HDF5 files are written",
     )
     prefix_arg = DeclareLaunchArgument(
@@ -94,6 +94,7 @@ def generate_launch_description():
         name="record_manager",
         output="screen",
         parameters=[
+            teleop_config_yaml,
             {
                 "topics_to_record": TOPICS_TO_RECORD,
             },
@@ -136,6 +137,13 @@ def generate_launch_description():
             package="fr3_teleop",
             executable="gripper_manager",
             name="gripper_manager",
+            output="screen",
+            parameters=[teleop_config_yaml],
+        ),
+        Node(
+            package="fr3_teleop",
+            executable="franka_wrench_extractor",
+            name="franka_wrench_extractor",
             output="screen",
             parameters=[teleop_config_yaml],
         ),
