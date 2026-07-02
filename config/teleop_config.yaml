@@ -10,6 +10,14 @@ shared_topics:
     openmv_3ch: "/openmv_cam/event_frame_3ch"
     joint_states: "/joint_states"
     teleop_control: "/teleop/control"
+    robot_state: "/right_franka_robot_state_broadcaster/robot_state"
+    external_wrenches: "/right_franka/external_wrenches"
+
+franka_wrench_extractor:
+  ros__parameters:
+    robot_state_topic: "/right_franka_robot_state_broadcaster/robot_state"
+    output_topic: "/right_franka/external_wrenches"
+    publish_hz: 100.0
 
 shared_services:
   ros__parameters:
@@ -28,6 +36,11 @@ openmv_cam:
 
 record_manager:
   ros__parameters:
+    bag_storage: "mcap"
+    bag_shutdown_timeout_sec: 180.0
+    allow_force_kill_bag: false
+    bag_sigterm_timeout_sec: 30.0
+    bag_sigkill_timeout_sec: 10.0
     topics_to_record:
       - "/episode/control"
       - "/camera/camera/color/camera_info"
@@ -37,10 +50,11 @@ record_manager:
       - "/openmv_cam/image"
       - "/openmv_cam/event_frame_3ch"
       - "/joint_states"
+      - "/right_franka/external_wrenches"
 
 teleop_dashboard:
   ros__parameters:
-    overlay_hdf5_path: "/home/jau/dyros/src/fr3_teleop/assets/pih_ref_ofe.jpg"
+    overlay_hdf5_path: "/home/jau/dyros/src/fr3_teleop/assets/pih_ref_ofrgb.jpg"
     event_frame_mono_topic: "/openmv_cam/image"
     event_frame_3ch_topic: "/openmv_cam/event_frame_3ch"
     episode_control_topic: "/episode/control"
@@ -101,8 +115,8 @@ ps4_input_manager:
 
     spacemouse_enable_rotation: true
 
-    translation_sensitivity: 2.5
-    rotation_sensitivity: 5.0
+    translation_sensitivity: 2.25
+    rotation_sensitivity: 4.0
 
     haptic_pos_multiplier: 2.0
     haptic_lin_vel_multiplier: 1.0
@@ -132,22 +146,24 @@ ps4_input_manager:
       - "right_fr3_joint7"
 
     home_joint_positions:
-      - -0.11307370077073517 # 1
-      - -0.5780235358715815 # 2
-      - -0.125515130419747 # 3
-      - -2.6345995844121566 # 4
-      - -0.07698932141065598 #5
-      - 2.07024652434962 # 6
-      - 0.5979843918116214 # 7
+
+      # for peg-in-hole, good event view      
+      # - -0.11307370077073517 # 1
+      # - -0.5780235358715815 # 2
+      # - -0.125515130419747 # 3
+      # - -2.6345995844121566 # 4
+      # - -0.07698932141065598 #5
+      # - 2.07024652434962 # 6
+      # - 0.5979843918116214 # 7
       
       # for peg-in-hole, good rgb view      
-      # - -0.00  # right_fr3_joint1
-      # - -0.8423077682863201      # right_fr3_joint2
-      # - 0.00   # right_fr3_joint3
-      # - -2.7754953819074073      # right_fr3_joint4
-      # - 0.0    # right_fr3_joint5
-      # - 1.9440275651964238       # right_fr3_joint6
-      # - 0.7853981634       # right_fr3_joint7
+      - -0.00  # right_fr3_joint1
+      - -0.8423077682863201      # right_fr3_joint2
+      - 0.00   # right_fr3_joint3
+      - -2.7754953819074073      # right_fr3_joint4
+      - 0.0    # right_fr3_joint5
+      - 1.9440275651964238       # right_fr3_joint6
+      - 0.7853981634       # right_fr3_joint7
 
 
 
@@ -160,6 +176,25 @@ ps4_input_manager:
       # - 0.00
       # - 2.62409615716241
       # - 0.7714418627146631
+
+      #potential intercept lookout pos:
+      # - right_fr3_joint1
+      # - right_fr3_joint2
+      # - right_fr3_joint3
+      # - right_fr3_joint6
+      # - right_fr3_joint5
+      # - right_fr3_joint7
+      # - right_fr3_joint4
+      # position:
+      # - -0.19740028628342593
+      # - 0.03858121849034308
+      # - 0.1267600929243978
+      # - 2.4056122844268737
+      # - 0.7563191672152622
+      # - -1.498061896977972
+      # - -2.5797302532250255
+
+
 
     home_vel_scale: 0.1
     home_acc_scale: 0.1

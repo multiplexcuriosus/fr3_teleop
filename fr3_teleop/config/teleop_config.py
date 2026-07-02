@@ -9,6 +9,7 @@ OPENMV_MONO_TOPIC = "/openmv_cam/image"
 OPENMV_3CH_TOPIC = "/openmv_cam/event_frame_3ch"
 JOINT_STATES_TOPIC = "/joint_states"
 TELEOP_CONTROL_TOPIC = "/teleop/control"
+EXTERNAL_WRENCHES_TOPIC = "/right_franka/external_wrenches"
 
 # Services
 START_RECORDING_SERVICE = "/record_manager/start_recording"
@@ -25,6 +26,7 @@ TOPICS_TO_RECORD = [
     #OPENMV_MONO_TOPIC,
     #OPENMV_3CH_TOPIC,
     JOINT_STATES_TOPIC,
+    EXTERNAL_WRENCHES_TOPIC,
 ]
 
 OPENMV_PARAMS = {

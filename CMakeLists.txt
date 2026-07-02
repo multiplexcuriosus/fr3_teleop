@@ -51,6 +51,13 @@ install(
 )
 
 install(
+  PROGRAMS
+    fr3_teleop/franka_wrench_extractor.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME franka_wrench_extractor
+)
+
+install(
   DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
