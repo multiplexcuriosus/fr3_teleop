@@ -7,6 +7,7 @@ from launch.substitutions import LaunchConfiguration
 from ament_index_python.packages import get_package_share_directory
 import os
 
+from fr3_teleop.config.interfaces import TOPICS
 from fr3_teleop.config.teleop_config import OPENMV_PARAMS
 
 
@@ -16,24 +17,15 @@ def generate_launch_description():
     scene_localizer_launch_path = os.path.join(
         get_package_share_directory("scene_localizer"),
         "launch",
-        "all_scene_localizer_nodes.launch.py",
+        "all_scene_localizer_nodes.launch.py"
     )
 
     realsense_launch_path = os.path.join(
         get_package_share_directory("realsense2_camera"),
         "launch",
-        "rs_launch.py",
+        "rs_launch.py"
     )
 
-    no_cams_arg = DeclareLaunchArgument(
-        "no_cams",
-        default_value="false",
-        description="Disable vision launch",
-    )
-    event_frame_mode_arg = DeclareLaunchArgument(
-        "event_frame_mode",
-        default_value=str(OPENMV_PARAMS.get("event_frame_mode", "cumulative")),
-    )
     event_frame_ch0_ms_arg = DeclareLaunchArgument(
         "event_frame_ch0_ms",
         default_value=str(OPENMV_PARAMS.get("event_frame_ch0_ms", 50.0)),
@@ -47,8 +39,6 @@ def generate_launch_description():
         default_value=str(OPENMV_PARAMS.get("event_frame_ch2_ms", 1000.0)),
     )
 
-    no_cams = LaunchConfiguration("no_cams")
-    event_frame_mode = LaunchConfiguration("event_frame_mode")
     event_frame_ch0_ms = LaunchConfiguration("event_frame_ch0_ms")
     event_frame_ch1_ms = LaunchConfiguration("event_frame_ch1_ms")
     event_frame_ch2_ms = LaunchConfiguration("event_frame_ch2_ms")
@@ -56,12 +46,10 @@ def generate_launch_description():
     openmv_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(openmv_launch_path),
         launch_arguments={
-            "event_frame_mode": event_frame_mode,
             "event_frame_ch0_ms": event_frame_ch0_ms,
             "event_frame_ch1_ms": event_frame_ch1_ms,
-            "event_frame_ch2_ms": event_frame_ch2_ms,
+            "event_frame_ch2_ms": event_frame_ch2_ms
         }.items(),
-        condition=UnlessCondition(no_cams),
     )
 
     ball_tracker_node = Node(
@@ -71,10 +59,9 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "input_image_topic": "/top_cam/camera/color/image_raw",
+                "input_image_topic": TOPICS["rgb_image"]
             }
-        ],
-        condition=UnlessCondition(no_cams),
+        ]
     )
 
     realsense_node = IncludeLaunchDescription(
@@ -82,9 +69,18 @@ def generate_launch_description():
         launch_arguments={
             "serial_no": "_243722074377",
             "camera_namespace": "top_cam",
+            "camera_name": "camera",
+
+            "enable_color": "true",
+            "rgb_camera.color_profile": "1280x720x30",
+
             "enable_depth": "false",
+            "enable_infra": "false",
             "enable_infra1": "false",
             "enable_infra2": "false",
+            "enable_gyro": "false",
+            "enable_accel": "false",
+
             "pointcloud.enable": "false",
             "align_depth.enable": "false",
             # "rgb_camera.enable_auto_exposure": "false",
@@ -94,13 +90,10 @@ def generate_launch_description():
             # "rgb_camera.enable_auto_white_balance": "false",
             # "rgb_camera.white_balance": "4500",
         }.items(),
-        condition=UnlessCondition(no_cams),
     )
 
     scene_localizer_nodes = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(scene_localizer_launch_path),
-        launch_arguments={}.items(),
-        condition=UnlessCondition(no_cams),
+        PythonLaunchDescriptionSource(scene_localizer_launch_path)
     )
 
     top_aruco = Node(
@@ -110,16 +103,14 @@ def generate_launch_description():
         namespace='/aruco_top_cam',
         output='screen',
         parameters=[{
-            'cam_base_topic': '/top_cam/camera/color/image_raw',
+            'cam_base_topic': TOPICS["rgb_image"],
             'marker_size': 0.0982,
             'marker_dict': '6X6_50'
-        }],
+        }]
     )
 
 
     return LaunchDescription([
-        no_cams_arg,
-        event_frame_mode_arg,
         event_frame_ch0_ms_arg,
         event_frame_ch1_ms_arg,
         event_frame_ch2_ms_arg,

@@ -33,17 +33,16 @@ class RecordManagerNode(Node):
         self.declare_parameter("openmv_stop_service", "/openmv_cam/stop_raw_event_recording")
         self.declare_parameter("raw_event_suffix", "_raw_events.h5")
 
+        # Deprecated fallback, only used if "topics_to_record" is not set.
+        # Kept minimal and free of stale experiment-specific camera paths;
+        # the canonical list lives in fr3_teleop.config.interfaces and is
+        # injected as "topics_to_record" by the launch file.
         self.declare_parameter("topics", [
             "/episode/control",
-            "/camera/camera/color/camera_info",
-            "/cartesian_cmd/twist",
-            "/teleop/gripper_state_cmd",
-            "/camera/camera/color/image_raw",
-            "/openmv_cam/image",
             "/joint_states",
-            "/chatter" #debug
         ])
         self.declare_parameter("topics_to_record", rclpy.Parameter.Type.STRING_ARRAY)
+        self.declare_parameter("required_topics", rclpy.Parameter.Type.STRING_ARRAY)
 
         self.declare_parameter("bag_storage", "mcap")
         self.declare_parameter("service_timeout_sec", 5.0)
@@ -88,6 +87,13 @@ class RecordManagerNode(Node):
             "Topic presence gate: "
             f"enforce={self._get_bool_param('enforce_topic_presence')}, "
             f"debug_bypass={self.debug_bypass_topic_presence}"
+        )
+        self.get_logger().info(
+            f"Topics selected for recording: {self._get_topics_to_record()}"
+        )
+        self.get_logger().info(
+            "Required topics for presence gate: "
+            f"{self._get_str_array_param('required_topics')}"
         )
 
     def _get_str_param(self, name):
@@ -254,12 +260,18 @@ class RecordManagerNode(Node):
         )
 
     def _missing_required_topics(self):
-        topics = self._get_topics_to_record()
+        required_topics = [
+            topic.strip()
+            for topic in self._get_str_array_param("required_topics")
+            if topic.strip()
+        ]
+
         missing = []
-        for topic in topics:
+        for topic in required_topics:
             publishers = self.get_publishers_info_by_topic(topic)
             if len(publishers) == 0:
                 missing.append(topic)
+
         return missing
 
     def _is_topic_presence_gate_enabled(self):

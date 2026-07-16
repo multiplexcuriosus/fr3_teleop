@@ -12,10 +12,14 @@ import h5py
 import numpy as np
 
 import rclpy
+from rclpy.action import ActionClient
 from rclpy.node import Node
 
+from fr3_husky_msgs.action import LineTrajectory
+from fr3_husky_msgs.srv import CaptureLineCenter
+from fr3_husky_msgs.srv import SetLineParams
 from sensor_msgs.msg import Image
-from std_msgs.msg import UInt8, UInt32
+from std_msgs.msg import UInt8, UInt32, String
 from std_srvs.srv import Trigger
 from std_srvs.srv import SetBool
 
@@ -36,10 +40,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-rgb_qos = QoSProfile(
-    reliability=ReliabilityPolicy.RELIABLE,
+image_qos = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
     history=HistoryPolicy.KEEP_LAST,
-    depth=5,
+    depth=1,
     durability=DurabilityPolicy.VOLATILE,
 )
 
@@ -50,9 +54,15 @@ event_qos = QoSProfile(
     durability=DurabilityPolicy.VOLATILE,
 )
 
+# Defaults below are only used when the launch file does not inject the
+# corresponding parameter. The canonical values live in
+# fr3_teleop.config.interfaces and are injected as ROS parameters by
+# teleop.launch.py (DASHBOARD_INTERFACE_PARAMS) so this module does not
+# import the interface registry directly.
 EVENT_FRAME_MONO_TOPIC = "/openmv_cam/image"
 EVENT_FRAME_3CH_TOPIC = "/openmv_cam/event_frame_3ch"
 DEFAULT_EVENT_FRAME_VISUALIZATION = "mono"
+RGB_CAM_TOPIC = "/top_cam/camera/color/image_raw"
 
 
 # ----------------------------
@@ -101,6 +111,10 @@ class TeleopState:
     episode_active: bool = False
     episode_start_monotonic: Optional[float] = None
     episode_elapsed_frozen: float = 0.0
+    reset_episode_counter_pending: bool = False
+
+    # Ball interception controller status, published by /interception_controller/status.
+    interception_status: str = "state=UNKNOWN"
 
 
 # ----------------------------
@@ -218,7 +232,13 @@ class ImageTile(QFrame):
 
 
 class MetricCard(QFrame):
-    def __init__(self, title: str, initial_value: str):
+    def __init__(
+        self,
+        title: str,
+        initial_value: str,
+        button_text: Optional[str] = None,
+        on_button_clicked=None,
+    ):
         super().__init__()
         self.setFrameShape(QFrame.StyledPanel)
         self.setStyleSheet("""
@@ -241,11 +261,34 @@ class MetricCard(QFrame):
         self.value_label.setAlignment(Qt.AlignCenter)
         self.value_label.setStyleSheet("font-size: 44px; font-weight: 700;")
 
+        self.action_button: Optional[QPushButton] = None
+        self.default_button_text = button_text if button_text is not None else ""
+        if button_text is not None and on_button_clicked is not None:
+            self.action_button = QPushButton(button_text)
+            self.action_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #6b5500;
+                    color: white;
+                    border: 1px solid #777777;
+                    border-radius: 8px;
+                    padding: 8px 12px;
+                    font-size: 15px;
+                    font-weight: 700;
+                }
+                QPushButton:disabled {
+                    background-color: #2d2d2d;
+                    color: #888888;
+                }
+            """)
+            self.action_button.clicked.connect(on_button_clicked)
+
         layout = QVBoxLayout()
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
         layout.addWidget(self.title_label)
         layout.addWidget(self.value_label, 1)
+        if self.action_button is not None:
+            layout.addWidget(self.action_button)
         self.setLayout(layout)
 
 
@@ -548,6 +591,382 @@ class EventFramePublishingControlCard(QFrame):
             self.three_channel_button.setStyleSheet(inactive_style)
 
 
+class LineMotionControlCard(QFrame):
+    def __init__(self, on_capture, on_to_start, on_to_end, on_to_center):
+        super().__init__()
+        self._on_capture = on_capture
+        self._on_to_start = on_to_start
+        self._on_to_end = on_to_end
+        self._on_to_center = on_to_center
+
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #111111;
+                border: 1px solid #444444;
+                border-radius: 10px;
+            }
+            QLabel {
+                color: white;
+                background-color: transparent;
+            }
+            QPushButton {
+                color: white;
+                border: 1px solid #555555;
+                border-radius: 8px;
+                padding: 10px 14px;
+                font-size: 16px;
+                font-weight: 700;
+                min-height: 22px;
+            }
+            QPushButton:disabled {
+                background-color: #2d2d2d;
+                color: #888888;
+                border-color: #3a3a3a;
+            }
+        """)
+
+        self.title_label = QLabel("Line Motion")
+        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setStyleSheet("font-size: 18px; font-weight: 600;")
+
+        self.capture_button = QPushButton("capture")
+        self.to_start_button = QPushButton("ToStart")
+        self.to_end_button = QPushButton("ToEnd")
+        self.to_center_button = QPushButton("ToCenter")
+
+        self.capture_button.setStyleSheet("background-color: #6b5500;")
+        self.to_start_button.setStyleSheet("background-color: #0051a8;")
+        self.to_end_button.setStyleSheet("background-color: #0b6b6b;")
+        self.to_center_button.setStyleSheet("background-color: #4b2f7d;")
+
+        self.capture_button.clicked.connect(self._on_capture)
+        self.to_start_button.clicked.connect(self._on_to_start)
+        self.to_end_button.clicked.connect(self._on_to_end)
+        self.to_center_button.clicked.connect(self._on_to_center)
+
+        top_button_row = QHBoxLayout()
+        top_button_row.setSpacing(8)
+        top_button_row.addWidget(self.capture_button)
+        top_button_row.addWidget(self.to_start_button)
+
+        bottom_button_row = QHBoxLayout()
+        bottom_button_row.setSpacing(8)
+        bottom_button_row.addWidget(self.to_end_button)
+        bottom_button_row.addWidget(self.to_center_button)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+        layout.addWidget(self.title_label)
+        layout.addLayout(top_button_row)
+        layout.addLayout(bottom_button_row)
+        layout.addStretch(1)
+        self.setLayout(layout)
+
+class InterceptionControlCard(QFrame):
+    def __init__(self, on_arm, on_disarm):
+        super().__init__()
+        self._on_arm = on_arm
+        self._on_disarm = on_disarm
+
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #111111;
+                border: 1px solid #444444;
+                border-radius: 10px;
+            }
+            QLabel {
+                color: white;
+                background-color: transparent;
+            }
+            QPushButton {
+                color: white;
+                border: 1px solid #555555;
+                border-radius: 8px;
+                padding: 10px 14px;
+                font-size: 16px;
+                font-weight: 700;
+                min-height: 22px;
+            }
+            QPushButton:disabled {
+                background-color: #2d2d2d;
+                color: #888888;
+                border-color: #3a3a3a;
+            }
+        """)
+
+        self.title_label = QLabel("Ball Interception")
+        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setStyleSheet("font-size: 18px; font-weight: 600;")
+
+        self.indicator = QLabel("UNKNOWN")
+        self.indicator.setAlignment(Qt.AlignCenter)
+        self.indicator.setMinimumHeight(54)
+        self.indicator.setWordWrap(True)
+        self.indicator.setStyleSheet("""
+            QLabel {
+                background-color: #333333;
+                color: white;
+                font-size: 16px;
+                font-weight: 800;
+                border-radius: 10px;
+                padding: 8px;
+            }
+        """)
+
+        self.arm_button = QPushButton("ARM INTERCEPT")
+        self.disarm_button = QPushButton("Disarm")
+
+        self.arm_button.setStyleSheet("background-color: #b36200;")
+        self.disarm_button.setStyleSheet("background-color: #5a1f1f;")
+
+        self.arm_button.clicked.connect(self._on_arm)
+        self.disarm_button.clicked.connect(self._on_disarm)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(8)
+        button_row.addWidget(self.arm_button)
+        button_row.addWidget(self.disarm_button)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.indicator, 1)
+        layout.addLayout(button_row)
+        self.setLayout(layout)
+
+    def set_status_text(self, status: str):
+        status = str(status).strip()
+        if not status:
+            status = "state=UNKNOWN"
+
+        # Keep the card readable.
+        short_status = status
+        if len(short_status) > 90:
+            short_status = short_status[:87] + "..."
+
+        self.indicator.setText(short_status)
+
+        upper = status.upper()
+        if "ARMED_WAITING" in upper:
+            color = "#b36200"
+            text_color = "white"
+        elif "EXECUTING" in upper or "SENDING_ACTION" in upper or "PROJECTING" in upper:
+            color = "#0051a8"
+            text_color = "white"
+        elif "FROZEN" in upper:
+            color = "#333333"
+            text_color = "white"
+        elif "ERROR" in upper or "FAILED" in upper or "TIMEOUT" in upper:
+            color = "#7a0000"
+            text_color = "white"
+        else:
+            color = "#333333"
+            text_color = "white"
+
+        self.indicator.setStyleSheet(f"""
+            QLabel {{
+                background-color: {color};
+                color: {text_color};
+                font-size: 16px;
+                font-weight: 800;
+                border-radius: 10px;
+                padding: 8px;
+            }}
+        """)
+
+
+class TeleopEpisodeCard(QFrame):
+    def __init__(self):
+        super().__init__()
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #111111;
+                border: 1px solid #444444;
+                border-radius: 10px;
+            }
+            QLabel {
+                color: white;
+                background-color: transparent;
+            }
+        """)
+
+        self.teleop_title = QLabel("Teleop")
+        self.teleop_title.setAlignment(Qt.AlignCenter)
+        self.teleop_title.setStyleSheet("font-size: 16px; font-weight: 600;")
+
+        self.episode_title = QLabel("Episode")
+        self.episode_title.setAlignment(Qt.AlignCenter)
+        self.episode_title.setStyleSheet("font-size: 16px; font-weight: 600;")
+
+        self.teleop_indicator = QLabel("DISABLED")
+        self.teleop_indicator.setAlignment(Qt.AlignCenter)
+        self.teleop_indicator.setMinimumHeight(74)
+
+        self.episode_indicator = QLabel("IDLE")
+        self.episode_indicator.setAlignment(Qt.AlignCenter)
+        self.episode_indicator.setMinimumHeight(74)
+
+        teleop_col = QVBoxLayout()
+        teleop_col.setContentsMargins(0, 0, 0, 0)
+        teleop_col.setSpacing(6)
+        teleop_col.addWidget(self.teleop_title)
+        teleop_col.addWidget(self.teleop_indicator, 1)
+
+        episode_col = QVBoxLayout()
+        episode_col.setContentsMargins(0, 0, 0, 0)
+        episode_col.setSpacing(6)
+        episode_col.addWidget(self.episode_title)
+        episode_col.addWidget(self.episode_indicator, 1)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addLayout(teleop_col, 1)
+        row.addLayout(episode_col, 1)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+        layout.addLayout(row)
+        self.setLayout(layout)
+
+        self.set_teleop(False)
+        self.set_episode_active(False)
+
+    def set_teleop(self, enabled: bool):
+        if enabled:
+            self.teleop_indicator.setText("ENABLED")
+            bg = "#0051a8"
+        else:
+            self.teleop_indicator.setText("DISABLED")
+            bg = "#7a0000"
+
+        self.teleop_indicator.setStyleSheet(f"""
+            QLabel {{
+                background-color: {bg};
+                color: white;
+                font-size: 24px;
+                font-weight: 800;
+                border-radius: 10px;
+                padding: 8px;
+            }}
+        """)
+
+    def set_episode_active(self, active: bool):
+        if active:
+            self.episode_indicator.setText("ACTIVE")
+            bg = "#008c3a"
+        else:
+            self.episode_indicator.setText("IDLE")
+            bg = "#7a0000"
+
+        self.episode_indicator.setStyleSheet(f"""
+            QLabel {{
+                background-color: {bg};
+                color: white;
+                font-size: 24px;
+                font-weight: 800;
+                border-radius: 10px;
+                padding: 8px;
+            }}
+        """)
+
+
+class RGBModeControlCard(QFrame):
+    def __init__(
+        self,
+        on_toggle_overlay,
+        on_select_source,
+        overlay_available: bool,
+        initial_overlay: bool = False,
+        initial_source: str = "raw",
+    ):
+        super().__init__()
+        self._on_toggle_overlay = on_toggle_overlay
+        self._on_select_source = on_select_source
+        self._overlay_available = bool(overlay_available)
+
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #111111;
+                border: 1px solid #444444;
+                border-radius: 10px;
+            }
+            QLabel {
+                color: white;
+                background-color: transparent;
+            }
+            QPushButton {
+                color: white;
+                border: 1px solid #555555;
+                border-radius: 8px;
+                padding: 9px 12px;
+                font-size: 15px;
+                font-weight: 700;
+                min-height: 22px;
+            }
+            QPushButton:disabled {
+                background-color: #2d2d2d;
+                color: #888888;
+                border-color: #3a3a3a;
+            }
+        """)
+
+        self.title_label = QLabel("RGB Mode")
+        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setStyleSheet("font-size: 18px; font-weight: 600;")
+
+        self.live_overlay_button = QPushButton()
+        self.raw_debug_button = QPushButton()
+
+        self.live_overlay_button.clicked.connect(self._on_toggle_overlay)
+        self.raw_debug_button.clicked.connect(self._toggle_source)
+
+        self.live_overlay_button.setEnabled(self._overlay_available)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(10)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.live_overlay_button)
+        layout.addWidget(self.raw_debug_button)
+        self.setLayout(layout)
+
+        self.set_overlay_mode(initial_overlay)
+        self.set_source_mode(initial_source)
+
+    def _toggle_source(self):
+        current = str(getattr(self, "_source_mode", "raw")).strip().lower()
+        next_mode = "debug" if current == "raw" else "raw"
+        self._on_select_source(next_mode)
+
+    def set_overlay_mode(self, overlay: bool):
+        if not self._overlay_available:
+            self.live_overlay_button.setText("RGB: Live (Overlay N/A)")
+            self.live_overlay_button.setStyleSheet("background-color: #2d2d2d; color: #888888;")
+            return
+
+        if overlay:
+            self.live_overlay_button.setText("RGB: Overlay")
+            self.live_overlay_button.setStyleSheet("background-color: #0f7f8c; color: white;")
+        else:
+            self.live_overlay_button.setText("RGB: Live")
+            self.live_overlay_button.setStyleSheet("background-color: #2d2d2d; color: #dddddd;")
+
+    def set_source_mode(self, source: str):
+        self._source_mode = str(source).strip().lower()
+        if self._source_mode == "debug":
+            self.raw_debug_button.setText("RGB: Debug")
+            self.raw_debug_button.setStyleSheet("background-color: #4b2f7d; color: white;")
+        else:
+            self.raw_debug_button.setText("RGB: Raw")
+            self.raw_debug_button.setStyleSheet("background-color: #0051a8; color: white;")
+
 class TeleopCard(QFrame):
     def __init__(self):
         super().__init__()
@@ -632,7 +1051,9 @@ class TeleopDashboardNode(Node):
         self.teleop_start_cmd = 1
         self.teleop_stop_cmd = 2
 
-        self.declare_parameter("rgb_topic", "/camera/camera/color/image_raw")
+        self.declare_parameter("rgb_topic", RGB_CAM_TOPIC)
+        self.declare_parameter("rgb_debug_topic", "/scene_localizer_debug/top_cam/debug_image")
+        self.declare_parameter("selected_rgb_source", "raw")  # raw | debug
         self.declare_parameter("event_frame_mono_topic", EVENT_FRAME_MONO_TOPIC)
         self.declare_parameter("event_frame_3ch_topic", EVENT_FRAME_3CH_TOPIC)
         self.declare_parameter("selected_event_frame_visualization", DEFAULT_EVENT_FRAME_VISUALIZATION)
@@ -641,6 +1062,7 @@ class TeleopDashboardNode(Node):
         self.declare_parameter("overlay_frame_index", 0)
         self.declare_parameter("overlay_alpha", 0.5)
         self.declare_parameter("overlay_rotate_ref_180", True)
+        self.declare_parameter("rgb_rotate_180", False)
         self.declare_parameter("episode_control_topic", "/episode/control")
         self.declare_parameter("teleop_control_topic", "/teleop/control")
         self.declare_parameter("num_valid_episodes_topic", "/data_collection/num_valid_episodes")
@@ -649,9 +1071,23 @@ class TeleopDashboardNode(Node):
         self.declare_parameter("set_debug_bypass_service", "/record_manager/set_debug_bypass_topic_presence")
         self.declare_parameter("start_event_frames_service", "/openmv_cam/start_event_frame_publishing")
         self.declare_parameter("stop_event_frames_service", "/openmv_cam/stop_event_frame_publishing")
+        self.declare_parameter("set_line_params_service", "/trajectory_executor/set_line_params")
+        self.declare_parameter("capture_line_center_service", "/trajectory_executor/capture_line_center")
+        self.declare_parameter("trajectory_executor_action", "/trajectory_executor")
+        self.declare_parameter("interception_arm_service", "/interception_controller/arm")
+        self.declare_parameter("interception_disarm_service", "/interception_controller/disarm")
+        self.declare_parameter("reset_episode_counter_service", "/data_collection/reset_episode_counter")
+        self.declare_parameter("interception_status_topic", "/interception_controller/status")
+        self.declare_parameter("line_ee_name", "right_fr3_hand_tcp")
+        self.declare_parameter("line_profile_name", "goto_s_x_10cm")
         self.declare_parameter("service_timeout_sec", 3.0)
 
         self.rgb_topic = self.get_parameter("rgb_topic").value
+        self.rgb_debug_topic = self.get_parameter("rgb_debug_topic").value
+        self.selected_rgb_source = str(self.get_parameter("selected_rgb_source").value).strip().lower()
+        if self.selected_rgb_source not in ("raw", "debug"):
+            self.selected_rgb_source = "raw"
+
         self.event_frame_mono_topic = self.get_parameter("event_frame_mono_topic").value
         self.event_frame_3ch_topic = self.get_parameter("event_frame_3ch_topic").value
         self.selected_event_frame_visualization = str(
@@ -665,6 +1101,7 @@ class TeleopDashboardNode(Node):
         self.overlay_alpha = float(self.get_parameter("overlay_alpha").value)
         self.overlay_alpha = min(1.0, max(0.0, self.overlay_alpha))
         self.overlay_rotate_ref_180 = bool(self.get_parameter("overlay_rotate_ref_180").value)
+        self.rgb_rotate_180 = bool(self.get_parameter("rgb_rotate_180").value)
         self.episode_control_topic = self.get_parameter("episode_control_topic").value
         self.teleop_control_topic = self.get_parameter("teleop_control_topic").value
         self.num_valid_episodes_topic = self.get_parameter("num_valid_episodes_topic").value
@@ -673,6 +1110,15 @@ class TeleopDashboardNode(Node):
         self.set_debug_bypass_service = self.get_parameter("set_debug_bypass_service").value
         self.start_event_frames_service = self.get_parameter("start_event_frames_service").value
         self.stop_event_frames_service = self.get_parameter("stop_event_frames_service").value
+        self.set_line_params_service = self.get_parameter("set_line_params_service").value
+        self.capture_line_center_service = self.get_parameter("capture_line_center_service").value
+        self.trajectory_executor_action = self.get_parameter("trajectory_executor_action").value
+        self.line_ee_name = str(self.get_parameter("line_ee_name").value)
+        self.line_profile_name = str(self.get_parameter("line_profile_name").value)
+        self.interception_arm_service = self.get_parameter("interception_arm_service").value
+        self.interception_disarm_service = self.get_parameter("interception_disarm_service").value
+        self.reset_episode_counter_service = self.get_parameter("reset_episode_counter_service").value
+        self.interception_status_topic = self.get_parameter("interception_status_topic").value
 
         self.rgb_buffer = LatestFrameBuffer()
         self.event_buffer = LatestFrameBuffer()
@@ -683,12 +1129,8 @@ class TeleopDashboardNode(Node):
         self.state_lock = threading.Lock()
         self.state = TeleopState()
 
-        self.rgb_sub = self.create_subscription(
-            Image,
-            self.rgb_topic,
-            self.rgb_cb,
-            rgb_qos,
-        )
+        self.rgb_sub = None
+        self.switch_rgb_source_mode(self.selected_rgb_source)
         self.event_frame_subscription = None
         self.switch_event_frame_visualization_mode(self.selected_event_frame_visualization)
         self.episode_control_sub = self.create_subscription(
@@ -715,8 +1157,23 @@ class TeleopDashboardNode(Node):
         self.set_debug_bypass_client = self.create_client(SetBool, self.set_debug_bypass_service)
         self.start_event_frames_client = self.create_client(Trigger, self.start_event_frames_service)
         self.stop_event_frames_client = self.create_client(Trigger, self.stop_event_frames_service)
+        self.set_line_params_client = self.create_client(SetLineParams, self.set_line_params_service)
+        self.capture_line_center_client = self.create_client(CaptureLineCenter, self.capture_line_center_service)
+        self.trajectory_executor_client = ActionClient(self, LineTrajectory, self.trajectory_executor_action)
+        self.interception_arm_client = self.create_client(Trigger, self.interception_arm_service)
+        self.interception_disarm_client = self.create_client(Trigger, self.interception_disarm_service)
+        self.reset_episode_counter_client = self.create_client(Trigger, self.reset_episode_counter_service)
+
+        self.interception_status_sub = self.create_subscription(
+            String,
+            self.interception_status_topic,
+            self.interception_status_cb,
+            10,
+        )
 
         self.get_logger().info(f"RGB topic: {self.rgb_topic}")
+        self.get_logger().info(f"RGB debug topic: {self.rgb_debug_topic}")
+        self.get_logger().info(f"Selected RGB source: {self.selected_rgb_source}")
         self.get_logger().info(f"Event frame mono topic: {self.event_frame_mono_topic}")
         self.get_logger().info(f"Event frame 3-channel topic: {self.event_frame_3ch_topic}")
         self.get_logger().info(f"Selected event frame visualization: {self.selected_event_frame_visualization}")
@@ -725,6 +1182,7 @@ class TeleopDashboardNode(Node):
         self.get_logger().info(f"Overlay frame index: {self.overlay_frame_index}")
         self.get_logger().info(f"Overlay alpha: {self.overlay_alpha:.3f}")
         self.get_logger().info(f"Overlay rotate ref 180: {self.overlay_rotate_ref_180}")
+        self.get_logger().info(f"RGB rotate ref 180: {self.rgb_rotate_180}")
         self.get_logger().info(self.overlay_status_text)
         self.get_logger().info(f"Episode control topic: {self.episode_control_topic}")
         self.get_logger().info(f"Teleop control topic: {self.teleop_control_topic}")
@@ -734,6 +1192,15 @@ class TeleopDashboardNode(Node):
         self.get_logger().info(f"Set debug bypass service: {self.set_debug_bypass_service}")
         self.get_logger().info(f"Start event frames service: {self.start_event_frames_service}")
         self.get_logger().info(f"Stop event frames service: {self.stop_event_frames_service}")
+        self.get_logger().info(f"Set line params service: {self.set_line_params_service}")
+        self.get_logger().info(f"Capture line center service: {self.capture_line_center_service}")
+        self.get_logger().info(f"Trajectory executor action: {self.trajectory_executor_action}")
+        self.get_logger().info(f"Line EE name: {self.line_ee_name}")
+        self.get_logger().info(f"Line profile name: {self.line_profile_name}")
+        self.get_logger().info(f"Interception arm service: {self.interception_arm_service}")
+        self.get_logger().info(f"Interception disarm service: {self.interception_disarm_service}")
+        self.get_logger().info(f"Reset episode counter service: {self.reset_episode_counter_service}")
+        self.get_logger().info(f"Interception status topic: {self.interception_status_topic}")
 
     def _load_overlay_reference_image(self):
         if not self.overlay_hdf5_path:
@@ -893,6 +1360,39 @@ class TeleopDashboardNode(Node):
             return self.event_frame_3ch_topic
         return self.event_frame_mono_topic
 
+    def _rgb_topic_for_selected_source(self) -> str:
+        if self.selected_rgb_source == "debug":
+            return self.rgb_debug_topic
+        return self.rgb_topic
+
+    def switch_rgb_source_mode(self, mode: str):
+        mode = str(mode).strip().lower()
+        if mode not in ("raw", "debug"):
+            self.get_logger().warning(f"Ignoring invalid RGB source mode: {mode}")
+            return
+
+        self.selected_rgb_source = mode
+        topic = self._rgb_topic_for_selected_source()
+
+        if self.rgb_sub is not None:
+            try:
+                self.destroy_subscription(self.rgb_sub)
+            except Exception as e:
+                self.get_logger().warning(f"Failed to destroy previous RGB subscription: {e}")
+            self.rgb_sub = None
+
+        self.rgb_buffer.clear()
+        self.rgb_sub = self.create_subscription(
+            Image,
+            topic,
+            self.rgb_cb,
+            image_qos,
+        )
+
+        self.get_logger().info(
+            f"RGB source switched to {mode}; subscribed topic: {topic}"
+        )
+
     def switch_event_frame_visualization_mode(self, mode: str):
         mode = str(mode).strip().lower()
         if mode not in ("mono", "3ch"):
@@ -1002,7 +1502,8 @@ class TeleopDashboardNode(Node):
     def rgb_cb(self, msg: Image):
         try:
             img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            img = cv2.rotate(img, cv2.ROTATE_180)
+            if self.rgb_rotate_180:
+                img = cv2.rotate(img, cv2.ROTATE_180)
             self.rgb_buffer.set(img, is_rgb=False)
         except Exception as e:
             self.get_logger().error(f"RGB callback failed: {e}")
@@ -1083,6 +1584,77 @@ class TeleopDashboardNode(Node):
             elif cmd == self.teleop_stop_cmd:
                 self.state.teleop_enabled = False
 
+    def interception_status_cb(self, msg: String):
+        with self.state_lock:
+            self.state.interception_status = str(msg.data)
+
+    def arm_interception(self):
+        self.get_logger().info("Requested ball interception ARM")
+
+        def on_success():
+            with self.state_lock:
+                self.state.last_service_status = "Ball interception armed."
+            return "Ball interception armed."
+
+        def on_failure(reason: str):
+            with self.state_lock:
+                self.state.last_service_status = f"Ball interception arm failed: {reason}"
+            return self.state.last_service_status
+
+        self.call_trigger_service_async(
+            self.interception_arm_client,
+            self.interception_arm_service,
+            on_success,
+            on_failure,
+        )
+
+    def disarm_interception(self):
+        self.get_logger().info("Requested ball interception DISARM")
+
+        def on_success():
+            with self.state_lock:
+                self.state.last_service_status = "Ball interception disarmed."
+            return "Ball interception disarmed."
+
+        def on_failure(reason: str):
+            with self.state_lock:
+                self.state.last_service_status = f"Ball interception disarm failed: {reason}"
+            return self.state.last_service_status
+
+        self.call_trigger_service_async(
+            self.interception_disarm_client,
+            self.interception_disarm_service,
+            on_success,
+            on_failure,
+        )
+
+    def reset_episode_counter(self):
+        with self.state_lock:
+            if self.state.reset_episode_counter_pending:
+                return
+            self.state.reset_episode_counter_pending = True
+
+        self.get_logger().info("Requested successful episode counter reset")
+
+        def on_success():
+            with self.state_lock:
+                self.state.reset_episode_counter_pending = False
+                self.state.last_service_status = "Successful episode counter reset to 0."
+            return self.state.last_service_status
+
+        def on_failure(reason: str):
+            with self.state_lock:
+                self.state.reset_episode_counter_pending = False
+                self.state.last_service_status = f"Episode counter reset failed: {reason}"
+            return self.state.last_service_status
+
+        self.call_trigger_service_async(
+            self.reset_episode_counter_client,
+            self.reset_episode_counter_service,
+            on_success,
+            on_failure,
+        )
+
     def get_state_snapshot(self) -> TeleopState:
         with self.state_lock:
             s = self.state
@@ -1097,6 +1669,8 @@ class TeleopDashboardNode(Node):
                 episode_active=s.episode_active,
                 episode_start_monotonic=s.episode_start_monotonic,
                 episode_elapsed_frozen=s.episode_elapsed_frozen,
+                reset_episode_counter_pending=s.reset_episode_counter_pending,
+                interception_status=s.interception_status,
             )
 
     def start_session_recording(self):
@@ -1235,6 +1809,181 @@ class TeleopDashboardNode(Node):
             on_failure,
         )
 
+    def capture_line(self):
+        timeout_sec = self._get_double_param("service_timeout_sec")
+
+        def worker():
+            try:
+                self._set_last_service_status("Setting line params...")
+
+                if not self._wait_for_service(self.set_line_params_client, timeout_sec):
+                    reason = f"Line params service unavailable: {self.set_line_params_service}"
+                    self.get_logger().error(reason)
+                    self._set_last_service_status(reason)
+                    return
+
+                set_req = SetLineParams.Request()
+                set_req.axis_x = 1.0
+                set_req.axis_y = 0.0
+                set_req.axis_z = 0.0
+                set_req.half_length = 0.2
+                set_req.safety_min_z = 0.03
+
+                set_future = self.set_line_params_client.call_async(set_req)
+                start = time.monotonic()
+                while rclpy.ok() and not set_future.done():
+                    if time.monotonic() - start > timeout_sec:
+                        reason = f"Set line params timed out: {self.set_line_params_service}"
+                        self.get_logger().error(reason)
+                        self._set_last_service_status(reason)
+                        return
+                    time.sleep(0.02)
+
+                set_result = set_future.result()
+                if set_result is None or not bool(set_result.success):
+                    detail = "" if set_result is None else str(set_result.message).strip()
+                    reason = (
+                        f"Set line params failed: {self.set_line_params_service}"
+                        if not detail
+                        else f"Set line params failed: {self.set_line_params_service} ({detail})"
+                    )
+                    self.get_logger().error(reason)
+                    self._set_last_service_status(reason)
+                    return
+
+                self._set_last_service_status("Line params set. Capturing center...")
+
+                if not self._wait_for_service(self.capture_line_center_client, timeout_sec):
+                    reason = (
+                        "Capture center service unavailable: "
+                        f"{self.capture_line_center_service}"
+                    )
+                    self.get_logger().error(reason)
+                    self._set_last_service_status(reason)
+                    return
+
+                capture_req = CaptureLineCenter.Request()
+                capture_req.ee_name = self.line_ee_name
+                capture_req.keep_current_orientation = True
+
+                capture_future = self.capture_line_center_client.call_async(capture_req)
+                start = time.monotonic()
+                while rclpy.ok() and not capture_future.done():
+                    if time.monotonic() - start > timeout_sec:
+                        reason = (
+                            "Capture line center timed out: "
+                            f"{self.capture_line_center_service}"
+                        )
+                        self.get_logger().error(reason)
+                        self._set_last_service_status(reason)
+                        return
+                    time.sleep(0.02)
+
+                capture_result = capture_future.result()
+                if capture_result is None or not bool(capture_result.success):
+                    detail = "" if capture_result is None else str(capture_result.message).strip()
+                    reason = (
+                        f"Capture line center failed: {self.capture_line_center_service}"
+                        if not detail
+                        else (
+                            "Capture line center failed: "
+                            f"{self.capture_line_center_service} ({detail})"
+                        )
+                    )
+                    self.get_logger().error(reason)
+                    self._set_last_service_status(reason)
+                    return
+
+                self._set_last_service_status("Line center captured.")
+
+            except Exception as e:
+                reason = f"Capture line error: {e}"
+                self.get_logger().error(reason)
+                self._set_last_service_status(reason)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def send_line_trajectory_goal(self, command: int, label: str):
+        timeout_sec = self._get_double_param("service_timeout_sec")
+
+        def worker():
+            try:
+                self._set_last_service_status(
+                    f"{label}: waiting for action server {self.trajectory_executor_action}..."
+                )
+
+                if not self.trajectory_executor_client.wait_for_server(timeout_sec=timeout_sec):
+                    reason = f"{label}: action server unavailable: {self.trajectory_executor_action}"
+                    self.get_logger().error(reason)
+                    self._set_last_service_status(reason)
+                    return
+
+                goal = LineTrajectory.Goal()
+                goal.command = int(command)
+                goal.ee_name = self.line_ee_name
+                goal.profile_name = self.line_profile_name
+                goal.target_s = 0.0
+                goal.v_max = 1.0
+                goal.a_max = 1.0
+                goal.j_max = 30.0
+                goal.hold_before_sec = 0.0
+                goal.hold_after_sec = 1.0
+
+                self._set_last_service_status(f"{label}: sending goal...")
+                send_future = self.trajectory_executor_client.send_goal_async(goal)
+
+                start = time.monotonic()
+                while rclpy.ok() and not send_future.done():
+                    if time.monotonic() - start > timeout_sec:
+                        reason = f"{label}: send goal timed out"
+                        self.get_logger().error(reason)
+                        self._set_last_service_status(reason)
+                        return
+                    time.sleep(0.02)
+
+                goal_handle = send_future.result()
+                if goal_handle is None:
+                    reason = f"{label}: failed to receive goal response"
+                    self.get_logger().error(reason)
+                    self._set_last_service_status(reason)
+                    return
+
+                if not goal_handle.accepted:
+                    reason = f"{label}: goal rejected"
+                    self.get_logger().warning(reason)
+                    self._set_last_service_status(reason)
+                    return
+
+                self._set_last_service_status(f"{label}: goal accepted, waiting for result...")
+                result_future = goal_handle.get_result_async()
+
+                start = time.monotonic()
+                while rclpy.ok() and not result_future.done():
+                    if time.monotonic() - start > timeout_sec:
+                        reason = f"{label}: waiting for result timed out"
+                        self.get_logger().error(reason)
+                        self._set_last_service_status(reason)
+                        return
+                    time.sleep(0.02)
+
+                result_response = result_future.result()
+                if result_response is None:
+                    reason = f"{label}: action returned no result"
+                    self.get_logger().error(reason)
+                    self._set_last_service_status(reason)
+                    return
+
+                self._set_last_service_status(
+                    f"{label}: result received (status={int(result_response.status)})"
+                )
+
+            except Exception as e:
+                reason = f"{label}: action error: {e}"
+                self.get_logger().error(reason)
+                self._set_last_service_status(reason)
+
+        threading.Thread(target=worker, daemon=True).start()
+
 
 # ----------------------------
 # Main window
@@ -1259,13 +2008,24 @@ class TeleopDashboardWindow(QMainWindow):
         top_row = QHBoxLayout()
         top_row.setSpacing(10)
 
-        self.teleop_card = TeleopCard()
-        self.episode_card = EpisodeCard()
-        self.success_card = MetricCard("Successful Episodes", "0")
+        self.teleop_episode_card = TeleopEpisodeCard()
+        self.rgb_mode_card = RGBModeControlCard(
+            on_toggle_overlay=self.toggle_overlay_mode,
+            on_select_source=self.switch_rgb_source_mode,
+            overlay_available=self.node.overlay_available(),
+            initial_overlay=self.use_overlay_rgb,
+            initial_source=self.node.selected_rgb_source,
+        )
+        self.success_card = MetricCard(
+            "Successful Episodes",
+            "0",
+            button_text="Reset Counter",
+            on_button_clicked=self.node.reset_episode_counter,
+        )
         self.duration_card = MetricCard("Current Episode [s]", "0.0")
 
-        top_row.addWidget(self.teleop_card, 1)
-        top_row.addWidget(self.episode_card, 1)
+        top_row.addWidget(self.teleop_episode_card, 1)
+        top_row.addWidget(self.rgb_mode_card, 1)
         top_row.addWidget(self.success_card, 1)
         top_row.addWidget(self.duration_card, 1)
 
@@ -1294,6 +2054,16 @@ class TeleopDashboardWindow(QMainWindow):
             on_select_visualization=self.switch_event_frame_visualization_mode,
             initial_mode=self.node.selected_event_frame_visualization,
         )
+        self.line_motion_card = LineMotionControlCard(
+            on_capture=self.node.capture_line,
+            on_to_start=lambda: self.node.send_line_trajectory_goal(2, "ToStart"),
+            on_to_end=lambda: self.node.send_line_trajectory_goal(3, "ToEnd"),
+            on_to_center=lambda: self.node.send_line_trajectory_goal(6, "ToCenter"),
+        )
+        self.interception_card = InterceptionControlCard(
+            on_arm=self.node.arm_interception,
+            on_disarm=self.node.disarm_interception,
+        )
 
         self.status_card = QFrame()
         self.status_card.setFrameShape(QFrame.StyledPanel)
@@ -1313,19 +2083,6 @@ class TeleopDashboardWindow(QMainWindow):
         status_layout.setContentsMargins(12, 12, 12, 12)
         status_layout.setSpacing(8)
 
-        self.help_label = QLabel("Double-click: fullscreen toggle")
-        self.help_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.help_label.setStyleSheet("color: #cfcfcf; font-size: 14px;")
-
-        self.overlay_toggle_button = QPushButton("RGB Mode: Live")
-        self.overlay_toggle_button.setStyleSheet(
-            "background-color: #2d2d2d; color: #dddddd; border-radius: 8px; padding: 8px 12px;"
-        )
-        self.overlay_toggle_button.clicked.connect(self.toggle_overlay_mode)
-        self.overlay_toggle_button.setEnabled(self.node.overlay_available())
-        if not self.node.overlay_available():
-            self.overlay_toggle_button.setText("RGB Mode: Live (Overlay Unavailable)")
-
         self.status_label = QLabel("Status: ")
         self.status_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.status_label.setWordWrap(True)
@@ -1333,8 +2090,6 @@ class TeleopDashboardWindow(QMainWindow):
         self.status_label.setStyleSheet("color: white; font-size: 15px;")
         self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        status_layout.addWidget(self.help_label)
-        status_layout.addWidget(self.overlay_toggle_button)
         status_layout.addWidget(self.status_label, 1)
         self.status_card.setLayout(status_layout)
 
@@ -1343,8 +2098,10 @@ class TeleopDashboardWindow(QMainWindow):
         self.status_card.setMaximumWidth(520)
 
         bottom_row.addWidget(self.session_recording_card, 1)
+        bottom_row.addWidget(self.line_motion_card, 1)
+        bottom_row.addWidget(self.interception_card, 1)
         bottom_row.addWidget(self.event_frames_card, 1)
-        bottom_row.addWidget(self.status_card, 1)
+        bottom_row.addWidget(self.status_card, 0)
 
         root.addLayout(top_row, 0)
         root.addLayout(image_row, 1)
@@ -1360,26 +2117,41 @@ class TeleopDashboardWindow(QMainWindow):
         self.gui_timer.timeout.connect(self.refresh_gui)
         self.gui_timer.start(50)  # 20 Hz GUI refresh
 
+        self._update_rgb_tile_title()
+
         if start_fullscreen:
             self.showFullScreen()
             self._is_fullscreen = True
 
+    def _update_rgb_tile_title(self):
+        source = str(self.node.selected_rgb_source).strip().lower()
+        overlay = "Overlay" if self.use_overlay_rgb else "Live"
+        source_label = "Debug" if source == "debug" else "Raw"
+        self.rgb_tile.title_label.setText(f"RGB ({source_label}, {overlay})")
+
     def toggle_overlay_mode(self):
         if not self.node.overlay_available():
+            self.use_overlay_rgb = False
+            if hasattr(self, "rgb_mode_card"):
+                self.rgb_mode_card.set_overlay_mode(False)
+            self._update_rgb_tile_title()
             return
+
         self.use_overlay_rgb = not self.use_overlay_rgb
-        if self.use_overlay_rgb:
-            self.overlay_toggle_button.setText("RGB Mode: Overlay")
-            self.overlay_toggle_button.setStyleSheet(
-                "background-color: #0f7f8c; color: white; border-radius: 8px; padding: 8px 12px;"
-            )
-            self.rgb_tile.title_label.setText("RGB (Overlay)")
-        else:
-            self.overlay_toggle_button.setText("RGB Mode: Live")
-            self.overlay_toggle_button.setStyleSheet(
-                "background-color: #2d2d2d; color: #dddddd; border-radius: 8px; padding: 8px 12px;"
-            )
-            self.rgb_tile.title_label.setText("RGB")
+
+        if hasattr(self, "rgb_mode_card"):
+            self.rgb_mode_card.set_overlay_mode(self.use_overlay_rgb)
+
+        self._update_rgb_tile_title()
+
+    def switch_rgb_source_mode(self, mode: str):
+        self.node.switch_rgb_source_mode(mode)
+
+        if hasattr(self, "rgb_mode_card"):
+            self.rgb_mode_card.set_source_mode(self.node.selected_rgb_source)
+
+        self.rgb_tile.clear()
+        self._update_rgb_tile_title()
 
     def switch_event_frame_visualization_mode(self, mode: str):
         self.node.switch_event_frame_visualization_mode(mode)
@@ -1425,18 +2197,31 @@ class TeleopDashboardWindow(QMainWindow):
 
         # State
         s = self.node.get_state_snapshot()
-        self.teleop_card.set_teleop(s.teleop_enabled)
-        self.episode_card.set_episode_active(s.episode_active)
+        self.teleop_episode_card.set_teleop(s.teleop_enabled)
+        self.teleop_episode_card.set_episode_active(s.episode_active)
         self.session_recording_card.set_active(s.session_recording_active)
         self.session_recording_card.set_debug_bypass(s.debug_bypass_topic_presence)
         self.event_frames_card.set_active(s.event_frame_publishing_active)
         self.event_frames_card.set_visualization_mode(self.node.selected_event_frame_visualization)
+        self.rgb_mode_card.set_overlay_mode(self.use_overlay_rgb)
+        self.rgb_mode_card.set_source_mode(self.node.selected_rgb_source)
+        self.interception_card.set_status_text(s.interception_status)
         self.success_card.value_label.setText(str(s.successful_episodes))
+        if self.success_card.action_button is not None:
+            self.success_card.action_button.setEnabled(not s.reset_episode_counter_pending)
+            if s.reset_episode_counter_pending:
+                self.success_card.action_button.setText("Resetting...")
+            else:
+                self.success_card.action_button.setText(self.success_card.default_button_text)
         overlay_mode = "Overlay" if self.use_overlay_rgb else "Live"
         self.status_label.setText(
             f"Status: {s.last_service_status}\n"
+            f"Interception: {getattr(s, 'interception_status', 'state=UNKNOWN')}\n"
+            f"RGB Source: {self.node.selected_rgb_source}\n"
             f"RGB Mode: {overlay_mode}\n"
-            f"{self.node.overlay_status_text}"
+            f"{self.node.overlay_status_text}\n"
+            f"Raw RGB topic: {self.node.rgb_topic}\n"
+            f"Debug RGB topic: {self.node.rgb_debug_topic}"
         )
 
         if self._last_event_frame_publishing_active is None:

@@ -4,7 +4,7 @@ set -euo pipefail
 # -----------------------------
 # Defaults
 # -----------------------------
-OUT_DIR="data/bags"
+OUT_DIR="/home/jau/data/bags/"
 PREFIX=""
 BAG_NAME=""
 
@@ -51,7 +51,7 @@ cat <<EOF > "$DELETE_SCRIPT"
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUT_DIR="data/bags"
+OUT_DIR="/home/jau/data/bags/"
 LATEST=\$(ls -dt "\${OUT_DIR}/"* 2>/dev/null | head -n 1 || true)
 
 if [ -z "\$LATEST" ]; then

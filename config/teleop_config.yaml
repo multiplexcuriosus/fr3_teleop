@@ -1,29 +1,6 @@
-shared_topics:
-  ros__parameters:
-    episode_control: "/episode/control"
-    camera_info: "/camera/camera/color/camera_info"
-    twist_cmd: "/cartesian_cmd/twist"
-    gripper_state_command: "/teleop/gripper_state_cmd"
-    gripper_command: "/teleop/gripper_cmd"
-    rgb_image: "/camera/camera/color/image_raw"
-    openmv_mono: "/openmv_cam/image"
-    openmv_3ch: "/openmv_cam/event_frame_3ch"
-    joint_states: "/joint_states"
-    teleop_control: "/teleop/control"
-    robot_state: "/right_franka_robot_state_broadcaster/robot_state"
-    external_wrenches: "/right_franka/external_wrenches"
-
 franka_wrench_extractor:
   ros__parameters:
-    robot_state_topic: "/right_franka_robot_state_broadcaster/robot_state"
-    output_topic: "/right_franka/external_wrenches"
     publish_hz: 100.0
-
-shared_services:
-  ros__parameters:
-    start_recording: "/record_manager/start_recording"
-    stop_recording: "/record_manager/stop_recording"
-    set_debug_bypass: "/record_manager/set_debug_bypass_topic_presence"
 
 openmv_cam:
   ros__parameters:
@@ -36,38 +13,17 @@ openmv_cam:
 
 record_manager:
   ros__parameters:
+    record_raw_events: false
     bag_storage: "mcap"
     bag_shutdown_timeout_sec: 180.0
     allow_force_kill_bag: false
     bag_sigterm_timeout_sec: 30.0
     bag_sigkill_timeout_sec: 10.0
-    topics_to_record:
-      - "/episode/control"
-      - "/camera/camera/color/camera_info"
-      - "/cartesian_cmd/twist"
-      - "/teleop/gripper_state_cmd"
-      - "/camera/camera/color/image_raw"
-      - "/openmv_cam/image"
-      - "/openmv_cam/event_frame_3ch"
-      - "/joint_states"
-      - "/right_franka/external_wrenches"
 
 teleop_dashboard:
   ros__parameters:
     overlay_hdf5_path: "/home/jau/dyros/src/fr3_teleop/assets/pih_ref_ofrgb.jpg"
-    event_frame_mono_topic: "/openmv_cam/image"
-    event_frame_3ch_topic: "/openmv_cam/event_frame_3ch"
-    episode_control_topic: "/episode/control"
-    teleop_control_topic: "/teleop/control"
-
-    start_recording_service: "/record_manager/start_recording"
-    stop_recording_service: "/record_manager/stop_recording"
-    set_debug_bypass_service: "/record_manager/set_debug_bypass_topic_presence"
-
-    start_event_frames_service: "/openmv_cam/start_event_frame_publishing"
-    stop_event_frames_service: "/openmv_cam/stop_event_frame_publishing"
-    start_raw_event_recording_service: "/openmv_cam/start_raw_event_recording"
-    stop_raw_event_recording_service: "/openmv_cam/stop_raw_event_recording"
+    selected_event_frame_visualization: "mono"
 
 spacemouse_publisher:
   ros__parameters:
@@ -83,15 +39,15 @@ ps4_input_manager:
     axis_episode: 6
     button_home: 1
     axis_teleop: 7
+    button_trajectory_phase_test: 3
+
+    interception_arm_button: 4
 
     left_stick_x_idx: 0
     left_stick_y_idx: 1
     right_stick_y_idx: 4
 
-    spacemouse_topic_name: "/spacemouse_cmd"
-
     enable_spacemouse_buttons: true
-    spacemouse_button_topic_name: "/spacemouse_buttons"
     spacemouse_button_gripper_open: 0
     spacemouse_button_gripper_close: 1
 
@@ -119,23 +75,32 @@ ps4_input_manager:
     rotation_sensitivity: 4.0
 
     haptic_pos_multiplier: 2.0
-    haptic_lin_vel_multiplier: 1.0
+    haptic_lin_vel_multiplier: 1.5
     haptic_ori_multiplier: 1.0
     haptic_ang_vel_multiplier: 1.0
 
-    twist_topic_name: "/cartesian_cmd/twist"
     twist_frame_id: "base_link"
 
-    teleop_control_topic: "/teleop/control"
     teleop_action_name: "/cartesian_executor"
     teleop_mode: 0
     teleop_ee_name: "right_fr3_hand_tcp"
     teleop_move_orientation: true
 
-    gripper_state_command_topic: "/teleop/gripper_state_cmd"
+
+
+
+    calib_joint_positions:
+      - -0.6013720777494865
+      - 0.13625118655691346
+      - 0.5943462254253002
+      - 1.7118612772539419
+      - -1.4973440679376173
+      - 0.048826214243365695
+      - -2.3023587506954564
+
+
 
     home_action_name: "/fr3_move_to_joint"
-
     home_joint_names:
       - "right_fr3_joint1"
       - "right_fr3_joint2"
@@ -147,6 +112,25 @@ ps4_input_manager:
 
     home_joint_positions:
 
+      # ball intercept gripper middle pos:
+      # name:
+      # - right_fr3_joint1
+      # - right_fr3_joint2
+      # - right_fr3_joint3
+      # - right_fr3_joint6
+      # - right_fr3_joint5  
+      # - right_fr3_joint7
+      # - right_fr3_joint4
+      # position:
+      - -0.39072696811657764
+      - 0.3292841373535625
+      - 0.321573958543309
+      - 2.775093428423281
+      - -0.339350694833375
+      - 2.53968058146413
+      - -2.425429984981667
+
+
       # for peg-in-hole, good event view      
       # - -0.11307370077073517 # 1
       # - -0.5780235358715815 # 2
@@ -157,13 +141,13 @@ ps4_input_manager:
       # - 0.5979843918116214 # 7
       
       # for peg-in-hole, good rgb view      
-      - -0.00  # right_fr3_joint1
-      - -0.8423077682863201      # right_fr3_joint2
-      - 0.00   # right_fr3_joint3
-      - -2.7754953819074073      # right_fr3_joint4
-      - 0.0    # right_fr3_joint5
-      - 1.9440275651964238       # right_fr3_joint6
-      - 0.7853981634       # right_fr3_joint7
+      # - -0.00  # right_fr3_joint1
+      # - -0.8423077682863201      # right_fr3_joint2
+      # - 0.00   # right_fr3_joint3
+      # - -2.7754953819074073      # right_fr3_joint4
+      # - 0.0    # right_fr3_joint5
+      # - 1.9440275651964238       # right_fr3_joint6
+      # - 0.7853981634       # right_fr3_joint7
 
 
 
@@ -177,22 +161,6 @@ ps4_input_manager:
       # - 2.62409615716241
       # - 0.7714418627146631
 
-      #potential intercept lookout pos:
-      # - right_fr3_joint1
-      # - right_fr3_joint2
-      # - right_fr3_joint3
-      # - right_fr3_joint6
-      # - right_fr3_joint5
-      # - right_fr3_joint7
-      # - right_fr3_joint4
-      # position:
-      # - -0.19740028628342593
-      # - 0.03858121849034308
-      # - 0.1267600929243978
-      # - 2.4056122844268737
-      # - 0.7563191672152622
-      # - -1.498061896977972
-      # - -2.5797302532250255
 
 
 
@@ -201,10 +169,6 @@ ps4_input_manager:
 
 gripper_manager:
   ros__parameters:
-    gripper_state_command_topic: "/teleop/gripper_state_cmd"
-    gripper_command_topic: "/teleop/gripper_cmd"
-    gripper_inhibit_topic: "/teleop/gripper_inhibit"
-    teleop_control_topic: "/teleop/control"
     gripper_move_action_name: "/right_franka_gripper/move"
     gripper_grasp_action_name: "/right_franka_gripper/grasp"
 

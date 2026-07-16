@@ -15,6 +15,7 @@ setup(
     entry_points={
         "console_scripts": [
             "franka_wrench_extractor = fr3_teleop.franka_wrench_extractor:main",
+            "teleop_dashboard = fr3_teleop.helpers.dashboard:main",
         ],
     },
 )

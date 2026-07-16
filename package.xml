@@ -16,6 +16,7 @@
   <depend>rclcpp_action</depend>
   <depend>franka_msgs</depend>
   <depend>fr3_husky_msgs</depend>
+  <depend>ball_interception_controller</depend>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_python</buildtool_depend>

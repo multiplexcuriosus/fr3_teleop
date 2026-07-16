@@ -58,6 +58,13 @@ install(
 )
 
 install(
+  PROGRAMS
+    fr3_teleop/helpers/dashboard.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME teleop_dashboard
+)
+
+install(
   DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
