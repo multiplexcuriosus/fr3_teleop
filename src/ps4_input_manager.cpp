@@ -152,10 +152,22 @@ public:
     home_acc_scale_ = this->declare_parameter<double>("home_acc_scale", 0.1);
     delayed_home_delay_ms_ = this->declare_parameter<int>("delayed_home_delay_ms", 750);
     home_settle_delay_ms_ = this->declare_parameter<int>("home_settle_delay_ms", delayed_home_delay_ms_);
+    post_home_capture_delay_ms_ = this->declare_parameter<int>(
+      "post_home_capture_delay_ms",
+      1750);
     joint_state_topic_ = this->declare_parameter<std::string>("joint_state_topic", "/right_fr3/joint_states");
     max_joint_state_age_ms_ = this->declare_parameter<int>("max_joint_state_age_ms", 250);
     home_requires_fresh_joint_state_ =
       this->declare_parameter<bool>("home_requires_fresh_joint_state", true);
+
+    if (post_home_capture_delay_ms_ < 0)
+    {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "post_home_capture_delay_ms=%d is negative; clamping to 0",
+        post_home_capture_delay_ms_);
+      post_home_capture_delay_ms_ = 0;
+    }
 
     const auto command_qos = rclcpp::QoS(rclcpp::KeepLast(1));
 
@@ -241,6 +253,10 @@ public:
     RCLCPP_INFO(this->get_logger(), "Trajectory armed on startup: %s", trajectory_armed_ ? "true" : "false");
     RCLCPP_INFO(this->get_logger(), "SpaceMouse timeout (ms): %d", spacemouse_timeout_ms_);
     RCLCPP_INFO(this->get_logger(), "SpaceMouse rotation enabled: %s", spacemouse_enable_rotation_ ? "true" : "false");
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Post-Home automatic line capture delay: %d ms",
+      post_home_capture_delay_ms_);
     if (enable_spacemouse_buttons_)
     {
       RCLCPP_INFO(this->get_logger(), "SpaceMouse buttons enabled on topic: %s", spacemouse_button_topic_name_.c_str());
@@ -1000,11 +1016,91 @@ private:
 
   void handleCaptureLineCenterPressed()
   {
-    if (home_active_ || home_goal_in_progress_ || pending_home_after_teleop_stop_ ||
-      pending_home_after_trajectory_stop_ || this->now() < home_block_until_)
+    requestCaptureLineCenter();
+  }
+
+  void stopPostHomeCaptureTimer()
+  {
+    if (post_home_capture_timer_)
     {
-      RCLCPP_WARN(this->get_logger(), "Capture line center rejected: home/recovery is active or pending.");
-      return;
+      post_home_capture_timer_->cancel();
+      post_home_capture_timer_.reset();
+    }
+  }
+
+  void startPostHomeCaptureTimer()
+  {
+    stopPostHomeCaptureTimer();
+
+    const auto delay = std::chrono::milliseconds(post_home_capture_delay_ms_);
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Home action handoff succeeded; waiting %d ms before automatic line-center capture.",
+      post_home_capture_delay_ms_);
+
+    post_home_capture_timer_ = this->create_wall_timer(
+      delay,
+      [this]()
+      {
+        // Make the wall timer one-shot.
+        stopPostHomeCaptureTimer();
+
+        if (home_active_ || home_goal_in_progress_)
+        {
+          RCLCPP_WARN(
+            this->get_logger(),
+            "Automatic post-Home capture canceled: another Home operation is active.");
+          return;
+        }
+
+        if (
+          pending_home_after_teleop_stop_ ||
+          pending_home_after_trajectory_stop_)
+        {
+          RCLCPP_WARN(
+            this->get_logger(),
+            "Automatic post-Home capture canceled: another Home transition is pending.");
+          return;
+        }
+
+        if (isTrajectoryBlocked())
+        {
+          RCLCPP_WARN(
+            this->get_logger(),
+            "Automatic post-Home capture canceled: trajectory executor is active, pending, or canceling.");
+          return;
+        }
+
+        RCLCPP_INFO(
+          this->get_logger(),
+          "Post-Home capture delay elapsed; requesting automatic line-center capture.");
+
+        requestCaptureLineCenter(
+          /* bypass_home_transition_check = */ true);
+      });
+  }
+
+  // Shared capture-line-center request logic used by both the manual R1
+  // button handler and the automatic post-Home capture.
+  //
+  // bypass_home_transition_check: when false (manual/R1 path), all existing
+  // safety checks apply unchanged, including the home/recovery guard and the
+  // home_block_until_ settle window. When true (automatic post-Home path),
+  // the home/recovery guard is skipped so capture is not rejected solely
+  // because Home was active immediately before this call, or because the
+  // brief post-Home settle window has not yet elapsed. All other safety
+  // checks (trajectory-blocked, service availability) still apply.
+  void requestCaptureLineCenter(bool bypass_home_transition_check = false)
+  {
+    if (!bypass_home_transition_check)
+    {
+      if (home_active_ || home_goal_in_progress_ || pending_home_after_teleop_stop_ ||
+        pending_home_after_trajectory_stop_ || this->now() < home_block_until_)
+      {
+        RCLCPP_WARN(this->get_logger(), "Capture line center rejected: home/recovery is active or pending.");
+        return;
+      }
     }
 
     if (isTrajectoryBlocked())
@@ -1526,6 +1622,7 @@ private:
   void sendHomeGoalNow()
   {
     stopDelayedHomeTimer();
+    stopPostHomeCaptureTimer();
 
     if (
       teleop_session_enabled_ || teleop_active_ || teleop_goal_pending_ || teleop_goal_in_progress_ ||
@@ -1594,6 +1691,7 @@ private:
     {
       if (!handle)
       {
+        stopPostHomeCaptureTimer();
         home_active_ = false;
         home_goal_in_progress_ = false;
         RCLCPP_WARN(this->get_logger(), "Home goal rejected.");
@@ -1612,15 +1710,21 @@ private:
       switch (result.code)
       {
         case rclcpp_action::ResultCode::SUCCEEDED:
-          RCLCPP_INFO(this->get_logger(), "Home goal succeeded.");
+          RCLCPP_INFO(
+            this->get_logger(),
+            "Home action reported success; scheduling delayed automatic line-center capture.");
+          startPostHomeCaptureTimer();
           break;
         case rclcpp_action::ResultCode::ABORTED:
+          stopPostHomeCaptureTimer();
           RCLCPP_WARN(this->get_logger(), "Home goal aborted.");
           break;
         case rclcpp_action::ResultCode::CANCELED:
+          stopPostHomeCaptureTimer();
           RCLCPP_WARN(this->get_logger(), "Home goal canceled.");
           break;
         default:
+          stopPostHomeCaptureTimer();
           RCLCPP_WARN(this->get_logger(), "Unknown home result code.");
           break;
       }
@@ -1634,6 +1738,7 @@ private:
     }
     catch (const std::exception & e)
     {
+      stopPostHomeCaptureTimer();
       home_active_ = false;
       home_goal_in_progress_ = false;
       pending_home_after_teleop_stop_ = false;
@@ -1718,6 +1823,7 @@ private:
   double home_acc_scale_;
   int delayed_home_delay_ms_;
   int home_settle_delay_ms_;
+  int post_home_capture_delay_ms_{1750};
   int max_joint_state_age_ms_;
   bool home_requires_fresh_joint_state_;
 
@@ -1785,6 +1891,7 @@ private:
   rclcpp::Service<TriggerSrv>::SharedPtr reset_episode_counter_service_server_;
   rclcpp::Time home_block_until_;
   rclcpp::TimerBase::SharedPtr delayed_home_timer_;
+  rclcpp::TimerBase::SharedPtr post_home_capture_timer_;
   rclcpp::TimerBase::SharedPtr trajectory_settle_timer_;
 
 };

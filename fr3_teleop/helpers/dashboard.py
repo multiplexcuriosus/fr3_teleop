@@ -1513,6 +1513,10 @@ class TeleopDashboardNode(Node):
             img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
             encoding = str(msg.encoding).strip().lower()
 
+            # FOR L-RGB-EVENT MOUNT; ROTATE EVENT FRAME 90° CCW
+            img = cv2.rotate(img,cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+
             if img.ndim == 2 or encoding == "mono8":
                 disp = pad_to_square_black(img)
                 is_rgb = False

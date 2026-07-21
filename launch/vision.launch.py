@@ -67,7 +67,7 @@ def generate_launch_description():
     realsense_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(realsense_launch_path),
         launch_arguments={
-            "serial_no": "_243722074377",
+            "serial_no": "_243722074377", # my-own: _017322074405
             "camera_namespace": "top_cam",
             "camera_name": "camera",
 

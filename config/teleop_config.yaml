@@ -166,6 +166,7 @@ ps4_input_manager:
 
     home_vel_scale: 0.1
     home_acc_scale: 0.1
+    post_home_capture_delay_ms: 1750
 
 gripper_manager:
   ros__parameters:

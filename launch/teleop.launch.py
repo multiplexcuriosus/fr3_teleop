@@ -127,7 +127,7 @@ def generate_launch_description():
             ],
         ),
         dashboard_node,
-        interception_controller_node,
+        #interception_controller_node,
 
         #vision_node,
     ])
