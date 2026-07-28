@@ -19,7 +19,7 @@ from fr3_husky_msgs.action import LineTrajectory
 from fr3_husky_msgs.srv import CaptureLineCenter
 from fr3_husky_msgs.srv import SetLineParams
 from sensor_msgs.msg import Image
-from std_msgs.msg import UInt8, UInt32, String
+from std_msgs.msg import Bool, UInt8, UInt32, String
 from std_srvs.srv import Trigger
 from std_srvs.srv import SetBool
 
@@ -30,6 +30,7 @@ from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -63,6 +64,83 @@ EVENT_FRAME_MONO_TOPIC = "/openmv_cam/image"
 EVENT_FRAME_3CH_TOPIC = "/openmv_cam/event_frame_3ch"
 DEFAULT_EVENT_FRAME_VISUALIZATION = "mono"
 RGB_CAM_TOPIC = "/top_cam/camera/color/image_raw"
+
+INTERCEPTION_ARM_MODES = {"scene", "rollout", "both"}
+INTERCEPTION_EXECUTION_MODES = {"both_dry", "scene_wet", "rollout_wet"}
+INTERCEPTION_ACTIVE_STATES = {
+    "RESETTING",
+    "ARMED_WAITING",
+    "PROJECTING",
+    "SENDING_ACTION",
+    "EXECUTING",
+}
+
+
+def extract_controller_state(status: str) -> str:
+    raw = str(status or "").strip()
+    if not raw:
+        return "UNKNOWN"
+    for part in raw.split(";"):
+        token = part.strip()
+        if token.lower().startswith("state="):
+            value = token.split("=", 1)[1].strip()
+            return value.upper() if value else "UNKNOWN"
+    return "UNKNOWN"
+
+
+def controller_state_is_active(status: str) -> bool:
+    return extract_controller_state(status) in INTERCEPTION_ACTIVE_STATES
+
+
+def extract_status_field(status: str, field_name: str) -> Optional[str]:
+    raw = str(status or "").strip()
+    if not raw:
+        return None
+    needle = str(field_name).strip().lower() + "="
+    for part in raw.split(";"):
+        token = part.strip()
+        if token.lower().startswith(needle):
+            return token.split("=", 1)[1].strip()
+    return None
+
+
+def extract_controller_dry_run(status: str) -> Optional[bool]:
+    value = extract_status_field(status, "dry_run")
+    if value is None:
+        return None
+    lowered = value.strip().lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    return None
+
+
+def derive_execution_mode(scene_status: str, rollout_status: str) -> str:
+    scene_dry = extract_controller_dry_run(scene_status)
+    rollout_dry = extract_controller_dry_run(rollout_status)
+    if scene_dry is None or rollout_dry is None:
+        return "unknown"
+    if scene_dry and rollout_dry:
+        return "both_dry"
+    if (not scene_dry) and rollout_dry:
+        return "scene_wet"
+    if scene_dry and (not rollout_dry):
+        return "rollout_wet"
+    return "both_wet"
+
+
+def execution_mode_label(mode: str) -> str:
+    normalized = str(mode).strip().lower()
+    if normalized == "both_dry":
+        return "BOTH DRY"
+    if normalized == "scene_wet":
+        return "SCENE WET"
+    if normalized == "rollout_wet":
+        return "ROLLOUT WET"
+    if normalized == "both_wet":
+        return "UNSAFE: BOTH WET"
+    return "UNKNOWN"
 
 
 # ----------------------------
@@ -113,8 +191,12 @@ class TeleopState:
     episode_elapsed_frozen: float = 0.0
     reset_episode_counter_pending: bool = False
 
-    # Ball interception controller status, published by /interception_controller/status.
-    interception_status: str = "state=UNKNOWN"
+    interception_arm_mode: str = "scene"
+    scene_interception_status: str = "state=UNKNOWN"
+    rollout_interception_status: str = "state=UNKNOWN"
+    scene_status_receive_monotonic: Optional[float] = None
+    rollout_status_receive_monotonic: Optional[float] = None
+    execution_mode_transition_pending: bool = False
 
 
 # ----------------------------
@@ -665,10 +747,17 @@ class LineMotionControlCard(QFrame):
         self.setLayout(layout)
 
 class InterceptionControlCard(QFrame):
-    def __init__(self, on_arm, on_disarm):
+    def __init__(self, on_arm, on_mode_change, on_execution_mode_change, initial_mode: str):
         super().__init__()
         self._on_arm = on_arm
-        self._on_disarm = on_disarm
+        self._on_mode_change = on_mode_change
+        self._on_execution_mode_change = on_execution_mode_change
+        self._mode = "scene"
+        self._execution_mode = "unknown"
+        self._transition_pending = False
+        self._arm_allowed = False
+        self._scene_wet_compatible = True
+        self._rollout_wet_compatible = True
 
         self.setFrameShape(QFrame.StyledPanel)
         self.setStyleSheet("""
@@ -703,80 +792,274 @@ class InterceptionControlCard(QFrame):
 
         self.indicator = QLabel("UNKNOWN")
         self.indicator.setAlignment(Qt.AlignCenter)
-        self.indicator.setMinimumHeight(54)
-        self.indicator.setWordWrap(True)
+        self.indicator.setMinimumHeight(90)
         self.indicator.setStyleSheet("""
             QLabel {
                 background-color: #333333;
                 color: white;
-                font-size: 16px;
+                font-size: 30px;
                 font-weight: 800;
                 border-radius: 10px;
-                padding: 8px;
+                padding: 10px;
             }
         """)
 
+        self.scene_mode_button = QPushButton("Scene")
+        self.rollout_mode_button = QPushButton("Rollout")
+        self.both_mode_button = QPushButton("Both")
+
+        self.mode_button_group = QButtonGroup(self)
+        self.mode_button_group.setExclusive(True)
+        for button in (self.scene_mode_button, self.rollout_mode_button, self.both_mode_button):
+            button.setCheckable(True)
+            self.mode_button_group.addButton(button)
+
+        self.scene_mode_button.clicked.connect(lambda: self._handle_mode_button("scene"))
+        self.rollout_mode_button.clicked.connect(lambda: self._handle_mode_button("rollout"))
+        self.both_mode_button.clicked.connect(lambda: self._handle_mode_button("both"))
+
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        mode_row.addWidget(self.scene_mode_button)
+        mode_row.addWidget(self.rollout_mode_button)
+        mode_row.addWidget(self.both_mode_button)
+
+        self.mode_title = QLabel("ARM ON NEXT TRIAL")
+        self.mode_title.setAlignment(Qt.AlignCenter)
+        self.mode_title.setStyleSheet("font-size: 12px; font-weight: 700; color: #bbbbbb;")
+
+        self.exec_title = QLabel("ROBOT EXECUTION")
+        self.exec_title.setAlignment(Qt.AlignCenter)
+        self.exec_title.setStyleSheet("font-size: 12px; font-weight: 700; color: #bbbbbb;")
+
+        self.exec_both_dry_button = QPushButton("Both dry")
+        self.exec_scene_wet_button = QPushButton("Scene WET")
+        self.exec_rollout_wet_button = QPushButton("Rollout WET")
+
+        self.exec_button_group = QButtonGroup(self)
+        self.exec_button_group.setExclusive(True)
+        for button in (
+            self.exec_both_dry_button,
+            self.exec_scene_wet_button,
+            self.exec_rollout_wet_button,
+        ):
+            button.setCheckable(True)
+            self.exec_button_group.addButton(button)
+
+        self.exec_both_dry_button.clicked.connect(
+            lambda: self._handle_execution_mode_button("both_dry")
+        )
+        self.exec_scene_wet_button.clicked.connect(
+            lambda: self._handle_execution_mode_button("scene_wet")
+        )
+        self.exec_rollout_wet_button.clicked.connect(
+            lambda: self._handle_execution_mode_button("rollout_wet")
+        )
+
+        exec_row = QHBoxLayout()
+        exec_row.setSpacing(8)
+        exec_row.addWidget(self.exec_both_dry_button)
+        exec_row.addWidget(self.exec_scene_wet_button)
+        exec_row.addWidget(self.exec_rollout_wet_button)
+
         self.arm_button = QPushButton("ARM INTERCEPT")
-        self.disarm_button = QPushButton("Disarm")
 
         self.arm_button.setStyleSheet("background-color: #b36200;")
-        self.disarm_button.setStyleSheet("background-color: #5a1f1f;")
 
         self.arm_button.clicked.connect(self._on_arm)
-        self.disarm_button.clicked.connect(self._on_disarm)
-
-        button_row = QHBoxLayout()
-        button_row.setSpacing(8)
-        button_row.addWidget(self.arm_button)
-        button_row.addWidget(self.disarm_button)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
         layout.addWidget(self.title_label)
         layout.addWidget(self.indicator, 1)
-        layout.addLayout(button_row)
+        layout.addWidget(self.mode_title)
+        layout.addLayout(mode_row)
+        layout.addWidget(self.exec_title)
+        layout.addLayout(exec_row)
+        layout.addWidget(self.arm_button)
         self.setLayout(layout)
 
-    def set_status_text(self, status: str):
-        status = str(status).strip()
-        if not status:
-            status = "state=UNKNOWN"
+        self.set_mode(initial_mode)
+        self.set_execution_mode("unknown")
+        self.set_transition_pending(False)
+        self._update_indicator("UNARMED", "#333333")
 
-        # Keep the card readable.
-        short_status = status
-        if len(short_status) > 90:
-            short_status = short_status[:87] + "..."
+    def _button_for_mode(self, mode: str) -> Optional[QPushButton]:
+        mapping = {
+            "scene": self.scene_mode_button,
+            "rollout": self.rollout_mode_button,
+            "both": self.both_mode_button,
+        }
+        return mapping.get(mode)
 
-        self.indicator.setText(short_status)
+    def _set_mode_styles(self) -> None:
+        for mode in ("scene", "rollout", "both"):
+            button = self._button_for_mode(mode)
+            if button is None:
+                continue
+            bg = "#b36200" if mode == self._mode else "#2d2d2d"
+            button.setStyleSheet(f"background-color: {bg};")
 
-        upper = status.upper()
-        if "ARMED_WAITING" in upper:
-            color = "#b36200"
-            text_color = "white"
-        elif "EXECUTING" in upper or "SENDING_ACTION" in upper or "PROJECTING" in upper:
-            color = "#0051a8"
-            text_color = "white"
-        elif "FROZEN" in upper:
-            color = "#333333"
-            text_color = "white"
-        elif "ERROR" in upper or "FAILED" in upper or "TIMEOUT" in upper:
-            color = "#7a0000"
-            text_color = "white"
+    def _button_for_execution_mode(self, mode: str) -> Optional[QPushButton]:
+        mapping = {
+            "both_dry": self.exec_both_dry_button,
+            "scene_wet": self.exec_scene_wet_button,
+            "rollout_wet": self.exec_rollout_wet_button,
+        }
+        return mapping.get(mode)
+
+    def _set_execution_mode_styles(self) -> None:
+        for mode in ("both_dry", "scene_wet", "rollout_wet"):
+            button = self._button_for_execution_mode(mode)
+            if button is None:
+                continue
+            selected = (mode == self._execution_mode)
+            if selected and mode == "both_dry":
+                bg = "#4f6070"
+            elif selected and mode in {"scene_wet", "rollout_wet"}:
+                bg = "#7a0000"
+            else:
+                bg = "#2d2d2d"
+            button.setStyleSheet(f"background-color: {bg};")
+
+    def set_mode(self, mode: str) -> None:
+        normalized = str(mode).strip().lower()
+        if normalized not in INTERCEPTION_ARM_MODES:
+            normalized = "scene"
+        self._mode = normalized
+        target = self._button_for_mode(self._mode)
+        if target is not None:
+            for button in (self.scene_mode_button, self.rollout_mode_button, self.both_mode_button):
+                button.blockSignals(True)
+            target.setChecked(True)
+            for button in (self.scene_mode_button, self.rollout_mode_button, self.both_mode_button):
+                button.blockSignals(False)
+        self._set_mode_styles()
+        self._scene_wet_compatible = self._mode in {"scene", "both"}
+        self._rollout_wet_compatible = self._mode in {"rollout", "both"}
+        self._update_control_enablement()
+
+    def _handle_mode_button(self, mode: str) -> None:
+        requested = str(mode).strip().lower()
+        if requested == self._mode:
+            return
+        accepted = bool(self._on_mode_change(requested))
+        if accepted:
+            self.set_mode(requested)
+            return
+        # Revert visual check-state if node rejects mode change.
+        self.set_mode(self._mode)
+
+    def set_execution_mode(self, mode: str) -> None:
+        normalized = str(mode).strip().lower()
+        if normalized not in INTERCEPTION_EXECUTION_MODES:
+            normalized = "unknown"
+        self._execution_mode = normalized
+
+        for button in (
+            self.exec_both_dry_button,
+            self.exec_scene_wet_button,
+            self.exec_rollout_wet_button,
+        ):
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
+
+        target = self._button_for_execution_mode(self._execution_mode)
+        if target is not None:
+            target.blockSignals(True)
+            target.setChecked(True)
+            target.blockSignals(False)
+
+        self._set_execution_mode_styles()
+
+    def _handle_execution_mode_button(self, mode: str) -> None:
+        if self._transition_pending:
+            return
+        accepted = bool(self._on_execution_mode_change(mode))
+        if not accepted:
+            self.set_execution_mode(self._execution_mode)
+
+    def set_transition_pending(self, pending: bool) -> None:
+        self._transition_pending = bool(pending)
+        self._update_control_enablement()
+
+    def _update_control_enablement(self) -> None:
+        if self._transition_pending:
+            self.exec_both_dry_button.setEnabled(False)
+            self.exec_scene_wet_button.setEnabled(False)
+            self.exec_rollout_wet_button.setEnabled(False)
         else:
-            color = "#333333"
-            text_color = "white"
+            self.exec_both_dry_button.setEnabled(True)
+            self.exec_scene_wet_button.setEnabled(self._scene_wet_compatible)
+            self.exec_rollout_wet_button.setEnabled(self._rollout_wet_compatible)
 
+        self.arm_button.setEnabled((not self._transition_pending) and self._arm_allowed)
+
+    def set_arm_allowed(self, allowed: bool) -> None:
+        self._arm_allowed = bool(allowed)
+        self._update_control_enablement()
+
+    def _update_indicator(self, text: str, color: str) -> None:
+        self.indicator.setText(text)
         self.indicator.setStyleSheet(f"""
             QLabel {{
                 background-color: {color};
-                color: {text_color};
-                font-size: 16px;
+                color: white;
+                font-size: 30px;
                 font-weight: 800;
                 border-radius: 10px;
-                padding: 8px;
+                padding: 10px;
             }}
         """)
+
+    def set_controller_statuses(
+        self,
+        mode: str,
+        scene_status: str,
+        rollout_status: str,
+        execution_mode: str,
+        transition_pending: bool,
+        arm_allowed: bool,
+    ) -> None:
+        self.set_mode(mode)
+        self.set_execution_mode(execution_mode)
+        self.set_transition_pending(transition_pending)
+        self.set_arm_allowed(arm_allowed)
+        scene_active = controller_state_is_active(scene_status)
+        rollout_active = controller_state_is_active(rollout_status)
+        live_label = execution_mode_label(execution_mode)
+
+        if execution_mode == "both_wet":
+            self._update_indicator("UNSAFE\nLIVE: BOTH", "#d40000")
+            return
+        if execution_mode == "unknown":
+            armed_text = "ARMED" if (scene_active or rollout_active) else "UNARMED"
+            self._update_indicator(f"{armed_text}\nLIVE: UNKNOWN", "#5f2f00")
+            return
+
+        if self._mode == "scene":
+            if scene_active:
+                self._update_indicator(f"ARMED: SCENE\nLIVE: {live_label}", "#b36200")
+            else:
+                self._update_indicator(f"UNARMED\nLIVE: {live_label}", "#333333")
+            return
+
+        if self._mode == "rollout":
+            if rollout_active:
+                self._update_indicator(f"ARMED: ROLLOUT\nLIVE: {live_label}", "#b36200")
+            else:
+                self._update_indicator(f"UNARMED\nLIVE: {live_label}", "#333333")
+            return
+
+        if scene_active and rollout_active:
+            self._update_indicator(f"ARMED: BOTH\nLIVE: {live_label}", "#b36200")
+        elif scene_active or rollout_active:
+            armed_mode = "SCENE" if scene_active else "ROLLOUT"
+            self._update_indicator(f"ARMED: {armed_mode}\nLIVE: {live_label}", "#6a1b1b")
+        else:
+            self._update_indicator(f"UNARMED\nLIVE: {live_label}", "#333333")
 
 
 class TeleopEpisodeCard(QFrame):
@@ -1074,10 +1357,19 @@ class TeleopDashboardNode(Node):
         self.declare_parameter("set_line_params_service", "/trajectory_executor/set_line_params")
         self.declare_parameter("capture_line_center_service", "/trajectory_executor/capture_line_center")
         self.declare_parameter("trajectory_executor_action", "/trajectory_executor")
-        self.declare_parameter("interception_arm_service", "/interception_controller/arm")
-        self.declare_parameter("interception_disarm_service", "/interception_controller/disarm")
+        self.declare_parameter("scene_interception_arm_service", "/interception_controller/arm")
+        self.declare_parameter("scene_interception_disarm_service", "/interception_controller/disarm")
+        self.declare_parameter("scene_interception_set_dry_run_service", "/interception_controller/set_dry_run")
+        self.declare_parameter("scene_interception_status_topic", "/interception_controller/status")
+        self.declare_parameter("rollout_interception_arm_service", "/rollout_interception_controller/arm")
+        self.declare_parameter("rollout_interception_disarm_service", "/rollout_interception_controller/disarm")
+        self.declare_parameter("rollout_interception_set_dry_run_service", "/rollout_interception_controller/set_dry_run")
+        self.declare_parameter("rollout_interception_status_topic", "/rollout_interception_controller/status")
+        self.declare_parameter("interception_arm_mode", "scene")
+        self.declare_parameter("interception_arm_mode_topic", "/teleop/interception_arm_mode")
+        self.declare_parameter("interception_arm_inhibit_topic", "/teleop/interception_arm_inhibit")
+        self.declare_parameter("interception_status_stale_sec", 2.0)
         self.declare_parameter("reset_episode_counter_service", "/data_collection/reset_episode_counter")
-        self.declare_parameter("interception_status_topic", "/interception_controller/status")
         self.declare_parameter("line_ee_name", "right_fr3_hand_tcp")
         self.declare_parameter("line_profile_name", "goto_s_x_10cm")
         self.declare_parameter("service_timeout_sec", 3.0)
@@ -1115,10 +1407,21 @@ class TeleopDashboardNode(Node):
         self.trajectory_executor_action = self.get_parameter("trajectory_executor_action").value
         self.line_ee_name = str(self.get_parameter("line_ee_name").value)
         self.line_profile_name = str(self.get_parameter("line_profile_name").value)
-        self.interception_arm_service = self.get_parameter("interception_arm_service").value
-        self.interception_disarm_service = self.get_parameter("interception_disarm_service").value
+        self.scene_interception_arm_service = self.get_parameter("scene_interception_arm_service").value
+        self.scene_interception_disarm_service = self.get_parameter("scene_interception_disarm_service").value
+        self.scene_interception_set_dry_run_service = self.get_parameter("scene_interception_set_dry_run_service").value
+        self.scene_interception_status_topic = self.get_parameter("scene_interception_status_topic").value
+        self.rollout_interception_arm_service = self.get_parameter("rollout_interception_arm_service").value
+        self.rollout_interception_disarm_service = self.get_parameter("rollout_interception_disarm_service").value
+        self.rollout_interception_set_dry_run_service = self.get_parameter("rollout_interception_set_dry_run_service").value
+        self.rollout_interception_status_topic = self.get_parameter("rollout_interception_status_topic").value
+        configured_mode = str(self.get_parameter("interception_arm_mode").value).strip().lower()
+        self.interception_arm_mode = self._validate_interception_arm_mode(configured_mode)
+        self.interception_arm_mode_topic = self.get_parameter("interception_arm_mode_topic").value
+        self.interception_arm_inhibit_topic = self.get_parameter("interception_arm_inhibit_topic").value
         self.reset_episode_counter_service = self.get_parameter("reset_episode_counter_service").value
-        self.interception_status_topic = self.get_parameter("interception_status_topic").value
+        self._interception_transition_active = False
+        self._interception_arm_inhibit_active = False
 
         self.rgb_buffer = LatestFrameBuffer()
         self.event_buffer = LatestFrameBuffer()
@@ -1128,9 +1431,15 @@ class TeleopDashboardNode(Node):
 
         self.state_lock = threading.Lock()
         self.state = TeleopState()
+        self.state.interception_arm_mode = self.interception_arm_mode
+        self.state.execution_mode_transition_pending = False
 
         self.rgb_sub = None
         self.switch_rgb_source_mode(self.selected_rgb_source)
+        self._interception_guard_timer = self.create_timer(
+            0.25,
+            self._refresh_interception_guard_timer_cb,
+        )
         self.event_frame_subscription = None
         self.switch_event_frame_visualization_mode(self.selected_event_frame_visualization)
         self.episode_control_sub = self.create_subscription(
@@ -1160,16 +1469,51 @@ class TeleopDashboardNode(Node):
         self.set_line_params_client = self.create_client(SetLineParams, self.set_line_params_service)
         self.capture_line_center_client = self.create_client(CaptureLineCenter, self.capture_line_center_service)
         self.trajectory_executor_client = ActionClient(self, LineTrajectory, self.trajectory_executor_action)
-        self.interception_arm_client = self.create_client(Trigger, self.interception_arm_service)
-        self.interception_disarm_client = self.create_client(Trigger, self.interception_disarm_service)
+        self.scene_interception_arm_client = self.create_client(Trigger, self.scene_interception_arm_service)
+        self.scene_interception_disarm_client = self.create_client(Trigger, self.scene_interception_disarm_service)
+        self.scene_interception_set_dry_run_client = self.create_client(
+            SetBool,
+            self.scene_interception_set_dry_run_service,
+        )
+        self.rollout_interception_arm_client = self.create_client(Trigger, self.rollout_interception_arm_service)
+        self.rollout_interception_disarm_client = self.create_client(Trigger, self.rollout_interception_disarm_service)
+        self.rollout_interception_set_dry_run_client = self.create_client(
+            SetBool,
+            self.rollout_interception_set_dry_run_service,
+        )
         self.reset_episode_counter_client = self.create_client(Trigger, self.reset_episode_counter_service)
 
-        self.interception_status_sub = self.create_subscription(
+        self.scene_interception_status_sub = self.create_subscription(
             String,
-            self.interception_status_topic,
-            self.interception_status_cb,
+            self.scene_interception_status_topic,
+            self.scene_interception_status_cb,
             10,
         )
+        self.rollout_interception_status_sub = self.create_subscription(
+            String,
+            self.rollout_interception_status_topic,
+            self.rollout_interception_status_cb,
+            10,
+        )
+
+        mode_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.interception_arm_mode_pub = self.create_publisher(
+            String,
+            self.interception_arm_mode_topic,
+            mode_qos,
+        )
+        self.interception_arm_inhibit_pub = self.create_publisher(
+            Bool,
+            self.interception_arm_inhibit_topic,
+            mode_qos,
+        )
+        self.publish_interception_arm_mode()
+        self._update_interception_arm_inhibit_from_state()
 
         self.get_logger().info(f"RGB topic: {self.rgb_topic}")
         self.get_logger().info(f"RGB debug topic: {self.rgb_debug_topic}")
@@ -1197,10 +1541,371 @@ class TeleopDashboardNode(Node):
         self.get_logger().info(f"Trajectory executor action: {self.trajectory_executor_action}")
         self.get_logger().info(f"Line EE name: {self.line_ee_name}")
         self.get_logger().info(f"Line profile name: {self.line_profile_name}")
-        self.get_logger().info(f"Interception arm service: {self.interception_arm_service}")
-        self.get_logger().info(f"Interception disarm service: {self.interception_disarm_service}")
+        self.get_logger().info(f"Scene interception arm service: {self.scene_interception_arm_service}")
+        self.get_logger().info(f"Scene interception disarm service: {self.scene_interception_disarm_service}")
+        self.get_logger().info(f"Scene interception set_dry_run service: {self.scene_interception_set_dry_run_service}")
+        self.get_logger().info(f"Scene interception status topic: {self.scene_interception_status_topic}")
+        self.get_logger().info(f"Rollout interception arm service: {self.rollout_interception_arm_service}")
+        self.get_logger().info(f"Rollout interception disarm service: {self.rollout_interception_disarm_service}")
+        self.get_logger().info(f"Rollout interception set_dry_run service: {self.rollout_interception_set_dry_run_service}")
+        self.get_logger().info(f"Rollout interception status topic: {self.rollout_interception_status_topic}")
+        self.get_logger().info(f"Interception arm mode: {self.interception_arm_mode}")
+        self.get_logger().info(f"Interception arm mode topic: {self.interception_arm_mode_topic}")
+        self.get_logger().info(f"Interception arm inhibit topic: {self.interception_arm_inhibit_topic}")
         self.get_logger().info(f"Reset episode counter service: {self.reset_episode_counter_service}")
-        self.get_logger().info(f"Interception status topic: {self.interception_status_topic}")
+
+    def _validate_interception_arm_mode(self, mode: str) -> str:
+        normalized = str(mode).strip().lower()
+        if normalized in INTERCEPTION_ARM_MODES:
+            return normalized
+        self.get_logger().warning(
+            f"Invalid interception_arm_mode '{mode}', falling back to 'scene'"
+        )
+        return "scene"
+
+    def publish_interception_arm_mode(self) -> None:
+        msg = String()
+        msg.data = self.interception_arm_mode
+        self.interception_arm_mode_pub.publish(msg)
+
+    def publish_interception_arm_inhibit(self, inhibit: bool) -> None:
+        if bool(inhibit) == bool(self._interception_arm_inhibit_active):
+            return
+        msg = Bool()
+        msg.data = bool(inhibit)
+        self.interception_arm_inhibit_pub.publish(msg)
+        self._interception_arm_inhibit_active = bool(inhibit)
+
+    def _set_transition_pending(self, pending: bool) -> None:
+        with self.state_lock:
+            self.state.execution_mode_transition_pending = bool(pending)
+        self._interception_transition_active = bool(pending)
+        self._update_interception_arm_inhibit_from_state()
+
+    def _status_is_stale(self, last_receive_monotonic: Optional[float]) -> bool:
+        if last_receive_monotonic is None:
+            return True
+        stale_after = max(0.2, self._get_double_param("interception_status_stale_sec"))
+        return (time.monotonic() - float(last_receive_monotonic)) > stale_after
+
+    def _derive_execution_mode_from_state_locked(self) -> str:
+        if self._status_is_stale(self.state.scene_status_receive_monotonic):
+            return "unknown"
+        if self._status_is_stale(self.state.rollout_status_receive_monotonic):
+            return "unknown"
+        return derive_execution_mode(
+            self.state.scene_interception_status,
+            self.state.rollout_interception_status,
+        )
+
+    def _arm_target_allows_execution_mode(self, arm_mode: str, execution_mode: str) -> bool:
+        arm = str(arm_mode).strip().lower()
+        exec_mode = str(execution_mode).strip().lower()
+        if exec_mode == "scene_wet":
+            return arm in {"scene", "both"}
+        if exec_mode == "rollout_wet":
+            return arm in {"rollout", "both"}
+        return True
+
+    def _arm_safety_block_reason_locked(self) -> Optional[str]:
+        if self.state.execution_mode_transition_pending:
+            return "Execution-mode transition is in progress."
+
+        execution_mode = self._derive_execution_mode_from_state_locked()
+        if execution_mode == "unknown":
+            return "Execution mode is UNKNOWN (missing/stale controller status)."
+        if execution_mode == "both_wet":
+            return "Execution mode is UNSAFE: BOTH WET."
+        if not self._arm_target_allows_execution_mode(self.interception_arm_mode, execution_mode):
+            return (
+                f"Arm target '{self.interception_arm_mode}' is incompatible with "
+                f"execution mode '{execution_mode}'."
+            )
+        return None
+
+    def get_interception_execution_snapshot(self) -> tuple[str, bool, str]:
+        with self.state_lock:
+            mode = self._derive_execution_mode_from_state_locked()
+            reason = self._arm_safety_block_reason_locked()
+        return mode, (reason is None), "" if reason is None else reason
+
+    def _update_interception_arm_inhibit_from_state(self) -> None:
+        with self.state_lock:
+            reason = self._arm_safety_block_reason_locked()
+        self.publish_interception_arm_inhibit(reason is not None)
+
+    def _refresh_interception_guard_timer_cb(self) -> None:
+        self._update_interception_arm_inhibit_from_state()
+
+    def _call_setbool_service_sync(self, client, service_name: str, value: bool) -> tuple[bool, str]:
+        timeout_sec = self._get_double_param("service_timeout_sec")
+        if not self._wait_for_service(client, timeout_sec):
+            return False, f"service unavailable ({service_name})"
+
+        req = SetBool.Request()
+        req.data = bool(value)
+        future = client.call_async(req)
+        start = time.monotonic()
+        while rclpy.ok() and not future.done():
+            if time.monotonic() - start > timeout_sec:
+                return False, f"service call timed out ({service_name})"
+            time.sleep(0.02)
+
+        result = future.result()
+        if result is None:
+            return False, f"service call failed ({service_name})"
+        if not result.success:
+            detail = str(result.message).strip()
+            if detail:
+                return False, detail
+            return False, f"service returned failure ({service_name})"
+        return True, str(result.message).strip()
+
+    def _run_execution_mode_transition(self, target_mode: str) -> None:
+        target = str(target_mode).strip().lower()
+        self._set_last_service_status("Changing execution mode...")
+        self._set_transition_pending(True)
+
+        try:
+            if target == "both_dry":
+                scene_ok, scene_detail = self._call_setbool_service_sync(
+                    self.scene_interception_set_dry_run_client,
+                    self.scene_interception_set_dry_run_service,
+                    True,
+                )
+                rollout_ok, rollout_detail = self._call_setbool_service_sync(
+                    self.rollout_interception_set_dry_run_client,
+                    self.rollout_interception_set_dry_run_service,
+                    True,
+                )
+                if scene_ok and rollout_ok:
+                    status = "Execution mode updated: BOTH DRY."
+                elif scene_ok and not rollout_ok:
+                    status = f"Scene set dry; rollout set-dry failed: {rollout_detail}"
+                elif rollout_ok and not scene_ok:
+                    status = f"Rollout set dry; scene set-dry failed: {scene_detail}"
+                else:
+                    status = f"Set-dry failed: scene={scene_detail}; rollout={rollout_detail}"
+                self._set_last_service_status(status)
+                return
+
+            if target == "scene_wet":
+                rollout_ok, rollout_detail = self._call_setbool_service_sync(
+                    self.rollout_interception_set_dry_run_client,
+                    self.rollout_interception_set_dry_run_service,
+                    True,
+                )
+                if not rollout_ok:
+                    self._set_last_service_status(
+                        "Blocked SCENE WET transition: rollout must be DRY first "
+                        f"({rollout_detail})"
+                    )
+                    return
+
+                scene_ok, scene_detail = self._call_setbool_service_sync(
+                    self.scene_interception_set_dry_run_client,
+                    self.scene_interception_set_dry_run_service,
+                    False,
+                )
+                if scene_ok:
+                    self._set_last_service_status("Execution mode updated: SCENE WET.")
+                else:
+                    self._set_last_service_status(f"Scene set-wet failed: {scene_detail}")
+                return
+
+            if target == "rollout_wet":
+                scene_ok, scene_detail = self._call_setbool_service_sync(
+                    self.scene_interception_set_dry_run_client,
+                    self.scene_interception_set_dry_run_service,
+                    True,
+                )
+                if not scene_ok:
+                    self._set_last_service_status(
+                        "Blocked ROLLOUT WET transition: scene must be DRY first "
+                        f"({scene_detail})"
+                    )
+                    return
+
+                rollout_ok, rollout_detail = self._call_setbool_service_sync(
+                    self.rollout_interception_set_dry_run_client,
+                    self.rollout_interception_set_dry_run_service,
+                    False,
+                )
+                if rollout_ok:
+                    self._set_last_service_status("Execution mode updated: ROLLOUT WET.")
+                else:
+                    self._set_last_service_status(f"Rollout set-wet failed: {rollout_detail}")
+                return
+
+            self._set_last_service_status(f"Unknown execution mode request: {target}")
+        except Exception as e:
+            self._set_last_service_status(f"Execution mode transition failed: {e}")
+        finally:
+            self._set_transition_pending(False)
+
+    def request_execution_mode_change(self, mode: str) -> bool:
+        normalized = str(mode).strip().lower()
+        if normalized not in INTERCEPTION_EXECUTION_MODES:
+            self._set_last_service_status(f"Invalid execution mode: {mode}")
+            return False
+
+        with self.state_lock:
+            if self.state.execution_mode_transition_pending:
+                self.state.last_service_status = "Execution-mode transition already in progress."
+                return False
+
+            scene_active = controller_state_is_active(self.state.scene_interception_status)
+            rollout_active = controller_state_is_active(self.state.rollout_interception_status)
+            if scene_active or rollout_active:
+                self.state.last_service_status = (
+                    "Disarm interception controllers before changing execution mode."
+                )
+                return False
+
+        threading.Thread(
+            target=self._run_execution_mode_transition,
+            args=(normalized,),
+            daemon=True,
+        ).start()
+        return True
+
+    def _selected_controller_keys(self):
+        if self.interception_arm_mode == "rollout":
+            return ["rollout"]
+        if self.interception_arm_mode == "both":
+            return ["scene", "rollout"]
+        return ["scene"]
+
+    def _controller_specs(self, action: str):
+        specs = {
+            "scene": {
+                "label": "scene",
+                "arm": (self.scene_interception_arm_client, self.scene_interception_arm_service),
+                "disarm": (self.scene_interception_disarm_client, self.scene_interception_disarm_service),
+            },
+            "rollout": {
+                "label": "rollout",
+                "arm": (self.rollout_interception_arm_client, self.rollout_interception_arm_service),
+                "disarm": (self.rollout_interception_disarm_client, self.rollout_interception_disarm_service),
+            },
+        }
+        selected = []
+        for key in self._selected_controller_keys():
+            if key in specs:
+                client, service_name = specs[key][action]
+                selected.append((specs[key]["label"], client, service_name))
+        return selected
+
+    def _call_trigger_service_sync(self, client, service_name: str) -> tuple[bool, str]:
+        timeout_sec = self._get_double_param("service_timeout_sec")
+        if not self._wait_for_service(client, timeout_sec):
+            return False, f"service unavailable ({service_name})"
+
+        future = client.call_async(Trigger.Request())
+        start = time.monotonic()
+        while rclpy.ok() and not future.done():
+            if time.monotonic() - start > timeout_sec:
+                return False, f"service call timed out ({service_name})"
+            time.sleep(0.02)
+
+        result = future.result()
+        if result is None:
+            return False, f"service call failed ({service_name})"
+        if not result.success:
+            detail = str(result.message).strip()
+            if detail:
+                return False, detail
+            return False, f"service returned failure ({service_name})"
+        return True, ""
+
+    def _run_interception_dispatch(self, action: str) -> None:
+        action_name = "ARM" if action == "arm" else "DISARM"
+        selections = self._controller_specs(action)
+        self.get_logger().info(
+            f"Requested ball interception {action_name} in mode={self.interception_arm_mode}"
+        )
+
+        if not selections:
+            self._set_last_service_status("No interception controllers selected.")
+            return
+
+        def worker():
+            results: dict[str, tuple[bool, str]] = {}
+            for label, client, service_name in selections:
+                ok, detail = self._call_trigger_service_sync(client, service_name)
+                results[label] = (ok, detail)
+
+            labels = [label for label, _client, _service in selections]
+            if action == "arm":
+                if labels == ["scene"]:
+                    ok, detail = results["scene"]
+                    status = "Armed scene controller." if ok else f"Scene arm failed: {detail}"
+                elif labels == ["rollout"]:
+                    ok, detail = results["rollout"]
+                    status = "Armed rollout controller." if ok else f"Rollout arm failed: {detail}"
+                else:
+                    scene_ok, scene_detail = results.get("scene", (False, "not attempted"))
+                    rollout_ok, rollout_detail = results.get("rollout", (False, "not attempted"))
+                    if scene_ok and rollout_ok:
+                        status = "Armed scene and rollout controllers."
+                    elif scene_ok and not rollout_ok:
+                        status = f"Scene armed; rollout arm failed: {rollout_detail}"
+                    elif rollout_ok and not scene_ok:
+                        status = f"Rollout armed; scene arm failed: {scene_detail}"
+                    else:
+                        status = (
+                            f"Scene arm failed: {scene_detail}; "
+                            f"rollout arm failed: {rollout_detail}"
+                        )
+            else:
+                if labels == ["scene"]:
+                    ok, detail = results["scene"]
+                    status = "Disarmed scene controller." if ok else f"Scene disarm failed: {detail}"
+                elif labels == ["rollout"]:
+                    ok, detail = results["rollout"]
+                    status = "Disarmed rollout controller." if ok else f"Rollout disarm failed: {detail}"
+                else:
+                    scene_ok, scene_detail = results.get("scene", (False, "not attempted"))
+                    rollout_ok, rollout_detail = results.get("rollout", (False, "not attempted"))
+                    if scene_ok and rollout_ok:
+                        status = "Disarmed scene and rollout controllers."
+                    elif scene_ok and not rollout_ok:
+                        status = f"Scene disarmed; rollout disarm failed: {rollout_detail}"
+                    elif rollout_ok and not scene_ok:
+                        status = f"Rollout disarmed; scene disarm failed: {scene_detail}"
+                    else:
+                        status = (
+                            f"Scene disarm failed: {scene_detail}; "
+                            f"rollout disarm failed: {rollout_detail}"
+                        )
+
+            self._set_last_service_status(status)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def request_interception_arm_mode_change(self, mode: str) -> bool:
+        normalized = self._validate_interception_arm_mode(mode)
+        with self.state_lock:
+            if self.state.execution_mode_transition_pending:
+                self.state.last_service_status = (
+                    "Cannot change arm mode while execution-mode transition is active."
+                )
+                return False
+            scene_active = controller_state_is_active(self.state.scene_interception_status)
+            rollout_active = controller_state_is_active(self.state.rollout_interception_status)
+            if scene_active or rollout_active:
+                self.state.last_service_status = (
+                    "Disarm interception controllers before changing arm mode."
+                )
+                return False
+            self.interception_arm_mode = normalized
+            self.state.interception_arm_mode = normalized
+            self.state.last_service_status = f"Selected interception arm mode: {normalized}."
+
+        self.publish_interception_arm_mode()
+        self._update_interception_arm_inhibit_from_state()
+        self.get_logger().info(f"Interception arm mode changed to {normalized}")
+        return True
 
     def _load_overlay_reference_image(self):
         if not self.overlay_hdf5_path:
@@ -1588,49 +2293,28 @@ class TeleopDashboardNode(Node):
             elif cmd == self.teleop_stop_cmd:
                 self.state.teleop_enabled = False
 
-    def interception_status_cb(self, msg: String):
+    def scene_interception_status_cb(self, msg: String):
         with self.state_lock:
-            self.state.interception_status = str(msg.data)
+            self.state.scene_interception_status = str(msg.data)
+            self.state.scene_status_receive_monotonic = time.monotonic()
+        self._update_interception_arm_inhibit_from_state()
+
+    def rollout_interception_status_cb(self, msg: String):
+        with self.state_lock:
+            self.state.rollout_interception_status = str(msg.data)
+            self.state.rollout_status_receive_monotonic = time.monotonic()
+        self._update_interception_arm_inhibit_from_state()
 
     def arm_interception(self):
-        self.get_logger().info("Requested ball interception ARM")
-
-        def on_success():
-            with self.state_lock:
-                self.state.last_service_status = "Ball interception armed."
-            return "Ball interception armed."
-
-        def on_failure(reason: str):
-            with self.state_lock:
-                self.state.last_service_status = f"Ball interception arm failed: {reason}"
-            return self.state.last_service_status
-
-        self.call_trigger_service_async(
-            self.interception_arm_client,
-            self.interception_arm_service,
-            on_success,
-            on_failure,
-        )
+        with self.state_lock:
+            reason = self._arm_safety_block_reason_locked()
+            if reason is not None:
+                self.state.last_service_status = f"Arm blocked: {reason}"
+                return
+        self._run_interception_dispatch("arm")
 
     def disarm_interception(self):
-        self.get_logger().info("Requested ball interception DISARM")
-
-        def on_success():
-            with self.state_lock:
-                self.state.last_service_status = "Ball interception disarmed."
-            return "Ball interception disarmed."
-
-        def on_failure(reason: str):
-            with self.state_lock:
-                self.state.last_service_status = f"Ball interception disarm failed: {reason}"
-            return self.state.last_service_status
-
-        self.call_trigger_service_async(
-            self.interception_disarm_client,
-            self.interception_disarm_service,
-            on_success,
-            on_failure,
-        )
+        self._run_interception_dispatch("disarm")
 
     def reset_episode_counter(self):
         with self.state_lock:
@@ -1674,7 +2358,12 @@ class TeleopDashboardNode(Node):
                 episode_start_monotonic=s.episode_start_monotonic,
                 episode_elapsed_frozen=s.episode_elapsed_frozen,
                 reset_episode_counter_pending=s.reset_episode_counter_pending,
-                interception_status=s.interception_status,
+                interception_arm_mode=s.interception_arm_mode,
+                scene_interception_status=s.scene_interception_status,
+                rollout_interception_status=s.rollout_interception_status,
+                scene_status_receive_monotonic=s.scene_status_receive_monotonic,
+                rollout_status_receive_monotonic=s.rollout_status_receive_monotonic,
+                execution_mode_transition_pending=s.execution_mode_transition_pending,
             )
 
     def start_session_recording(self):
@@ -2066,7 +2755,9 @@ class TeleopDashboardWindow(QMainWindow):
         )
         self.interception_card = InterceptionControlCard(
             on_arm=self.node.arm_interception,
-            on_disarm=self.node.disarm_interception,
+            on_mode_change=self.node.request_interception_arm_mode_change,
+            on_execution_mode_change=self.node.request_execution_mode_change,
+            initial_mode=self.node.interception_arm_mode,
         )
 
         self.status_card = QFrame()
@@ -2092,14 +2783,14 @@ class TeleopDashboardWindow(QMainWindow):
         self.status_label.setWordWrap(True)
         self.status_label.setTextFormat(Qt.PlainText)
         self.status_label.setStyleSheet("color: white; font-size: 15px;")
-        self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Keep label content from changing parent layout size hints.
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
 
         status_layout.addWidget(self.status_label, 1)
         self.status_card.setLayout(status_layout)
 
-        # Keep controls usable by preventing status text from dictating row width.
-        self.status_card.setMinimumWidth(340)
-        self.status_card.setMaximumWidth(520)
+        # Keep controls usable by preventing status text from dictating row size.
+        self.status_card.setFixedSize(420, 240)
 
         bottom_row.addWidget(self.session_recording_card, 1)
         bottom_row.addWidget(self.line_motion_card, 1)
@@ -2209,7 +2900,15 @@ class TeleopDashboardWindow(QMainWindow):
         self.event_frames_card.set_visualization_mode(self.node.selected_event_frame_visualization)
         self.rgb_mode_card.set_overlay_mode(self.use_overlay_rgb)
         self.rgb_mode_card.set_source_mode(self.node.selected_rgb_source)
-        self.interception_card.set_status_text(s.interception_status)
+        execution_mode, arm_allowed, arm_block_reason = self.node.get_interception_execution_snapshot()
+        self.interception_card.set_controller_statuses(
+            mode=s.interception_arm_mode,
+            scene_status=s.scene_interception_status,
+            rollout_status=s.rollout_interception_status,
+            execution_mode=execution_mode,
+            transition_pending=s.execution_mode_transition_pending,
+            arm_allowed=arm_allowed,
+        )
         self.success_card.value_label.setText(str(s.successful_episodes))
         if self.success_card.action_button is not None:
             self.success_card.action_button.setEnabled(not s.reset_episode_counter_pending)
@@ -2220,12 +2919,11 @@ class TeleopDashboardWindow(QMainWindow):
         overlay_mode = "Overlay" if self.use_overlay_rgb else "Live"
         self.status_label.setText(
             f"Status: {s.last_service_status}\n"
-            f"Interception: {getattr(s, 'interception_status', 'state=UNKNOWN')}\n"
-            f"RGB Source: {self.node.selected_rgb_source}\n"
-            f"RGB Mode: {overlay_mode}\n"
-            f"{self.node.overlay_status_text}\n"
-            f"Raw RGB topic: {self.node.rgb_topic}\n"
-            f"Debug RGB topic: {self.node.rgb_debug_topic}"
+            f"Interception arm mode: {s.interception_arm_mode}\n"
+            f"Interception execution mode: {execution_mode_label(execution_mode)}\n"
+            f"Execution transition pending: {s.execution_mode_transition_pending}\n"
+            f"Arm block reason: {arm_block_reason if arm_block_reason else '-'}\n"
+            f"Rollout controller: {s.rollout_interception_status}\n"
         )
 
         if self._last_event_frame_publishing_active is None:

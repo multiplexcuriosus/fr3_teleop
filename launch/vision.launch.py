@@ -43,6 +43,28 @@ def generate_launch_description():
     event_frame_ch1_ms = LaunchConfiguration("event_frame_ch1_ms")
     event_frame_ch2_ms = LaunchConfiguration("event_frame_ch2_ms")
 
+    inhibit_scene_localizer_arg = DeclareLaunchArgument(
+        "inhibit_scene_localizer",
+        default_value="false",
+    )
+    inhibit_scene_localizer_debug_arg = DeclareLaunchArgument(
+        "inhibit_scene_localizer_debug",
+        default_value="false",
+    )
+    inhibit_ball_3d_pose_estimator_arg = DeclareLaunchArgument(
+        "inhibit_ball_3d_pose_estimator",
+        default_value="false",
+    )
+    inhibit_ball_trajectory_estimator_arg = DeclareLaunchArgument(
+        "inhibit_ball_trajectory_estimator",
+        default_value="false",
+    )
+
+    inhibit_scene_localizer = LaunchConfiguration("inhibit_scene_localizer")
+    inhibit_scene_localizer_debug = LaunchConfiguration("inhibit_scene_localizer_debug")
+    inhibit_ball_3d_pose_estimator = LaunchConfiguration("inhibit_ball_3d_pose_estimator")
+    inhibit_ball_trajectory_estimator = LaunchConfiguration("inhibit_ball_trajectory_estimator")
+
     openmv_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(openmv_launch_path),
         launch_arguments={
@@ -93,7 +115,13 @@ def generate_launch_description():
     )
 
     scene_localizer_nodes = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(scene_localizer_launch_path)
+        PythonLaunchDescriptionSource(scene_localizer_launch_path),
+        launch_arguments={
+            "inhibit_scene_localizer": inhibit_scene_localizer,
+            "inhibit_scene_localizer_debug": inhibit_scene_localizer_debug,
+            "inhibit_ball_3d_pose_estimator": inhibit_ball_3d_pose_estimator,
+            "inhibit_ball_trajectory_estimator": inhibit_ball_trajectory_estimator,
+        }.items(),
     )
 
     top_aruco = Node(
@@ -114,6 +142,10 @@ def generate_launch_description():
         event_frame_ch0_ms_arg,
         event_frame_ch1_ms_arg,
         event_frame_ch2_ms_arg,
+        inhibit_scene_localizer_arg,
+        inhibit_scene_localizer_debug_arg,
+        inhibit_ball_3d_pose_estimator_arg,
+        inhibit_ball_trajectory_estimator_arg,
         openmv_node,
         ball_tracker_node,
         scene_localizer_nodes,

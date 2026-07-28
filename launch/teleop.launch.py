@@ -78,11 +78,30 @@ def generate_launch_description():
         ],
     )
 
-
-
-    interception_controller_node = IncludeLaunchDescription(
+    scene_interception_controller_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(interception_launch_path),
-        launch_arguments={}.items()
+        launch_arguments={
+            "node_name": "interception_controller",
+            "command_source": "scene",
+            "execution_backend": "cont_tracker",
+            "vmax": "1.2",
+        }.items(),
+    )
+
+    rollout_interception_controller_node = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(interception_launch_path),
+        launch_arguments={
+            "node_name": "rollout_interception_controller",
+            "command_source": "rollout",
+            "execution_backend": "cont_tracker",
+            "dry_run": "true",
+            "rollout_prediction_topic": "/act/intercept_prediction_current_abs_s",
+            "current_tcp_s_topic": "/middle_line/current_tcp_s",
+            "max_current_tcp_s_age_sec": "0.15",
+            "rollout_prediction_timeout_sec": "0.25",
+            "rollout_min_target_s_m": "-0.15",
+            "rollout_max_target_s_m": "0.15",
+        }.items(),
     )
 
     return LaunchDescription([
@@ -127,7 +146,8 @@ def generate_launch_description():
             ],
         ),
         dashboard_node,
-        #interception_controller_node,
+        scene_interception_controller_node,
+        rollout_interception_controller_node,
 
         #vision_node,
     ])

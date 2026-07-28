@@ -13,7 +13,7 @@ openmv_cam:
 
 record_manager:
   ros__parameters:
-    record_raw_events: false
+    record_raw_events: true
     bag_storage: "mcap"
     bag_shutdown_timeout_sec: 180.0
     allow_force_kill_bag: false

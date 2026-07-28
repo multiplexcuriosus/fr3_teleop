@@ -8,11 +8,13 @@
 #include <algorithm>
 #include <functional>
 #include <stdexcept>
+#include <cctype>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joy.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/u_int8.hpp"
 #include "std_msgs/msg/u_int32.hpp"
 #include "geometry_msgs/msg/twist.hpp"
@@ -104,10 +106,18 @@ public:
       "trajectory_capture_center_service", "/trajectory_executor/capture_line_center");
     reset_episode_counter_service_ = this->declare_parameter<std::string>(
       "reset_episode_counter_service", "/data_collection/reset_episode_counter");
-    interception_arm_service_ = this->declare_parameter<std::string>(
-      "interception_arm_service", "/interception_controller/arm");
-    interception_disarm_service_ = this->declare_parameter<std::string>(
-      "interception_disarm_service", "/interception_controller/disarm");
+    scene_interception_arm_service_ = this->declare_parameter<std::string>(
+      "scene_interception_arm_service", "/interception_controller/arm");
+    scene_interception_disarm_service_ = this->declare_parameter<std::string>(
+      "scene_interception_disarm_service", "/interception_controller/disarm");
+    rollout_interception_arm_service_ = this->declare_parameter<std::string>(
+      "rollout_interception_arm_service", "/rollout_interception_controller/arm");
+    rollout_interception_disarm_service_ = this->declare_parameter<std::string>(
+      "rollout_interception_disarm_service", "/rollout_interception_controller/disarm");
+    interception_arm_mode_topic_ = this->declare_parameter<std::string>(
+      "interception_arm_mode_topic", "/teleop/interception_arm_mode");
+    interception_arm_inhibit_topic_ = this->declare_parameter<std::string>(
+      "interception_arm_inhibit_topic", "/teleop/interception_arm_inhibit");
     initial_motion_interface_ = this->declare_parameter<std::string>("initial_motion_interface", "trajectory");
     trajectory_armed_by_default_ = this->declare_parameter<bool>("trajectory_armed_by_default", true);
     trajectory_profile_name_ = this->declare_parameter<std::string>("trajectory_profile_name", "phase_test_slow");
@@ -197,12 +207,24 @@ public:
           std::bind(&Ps4InputManager::spacemouseButtonsCallback, this, std::placeholders::_1));
     }
 
+    auto mode_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+    interception_arm_mode_sub_ = this->create_subscription<std_msgs::msg::String>(
+      interception_arm_mode_topic_,
+      mode_qos,
+      std::bind(&Ps4InputManager::interceptionArmModeCallback, this, std::placeholders::_1));
+    interception_arm_inhibit_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      interception_arm_inhibit_topic_,
+      mode_qos,
+      std::bind(&Ps4InputManager::interceptionArmInhibitCallback, this, std::placeholders::_1));
+
     teleop_client_ = rclcpp_action::create_client<TeleopAction>(this, teleop_action_name_);
     home_client_ = rclcpp_action::create_client<HomeAction>(this, home_action_name_);
     trajectory_client_ = rclcpp_action::create_client<TrajectoryAction>(this, trajectory_action_name_);
     capture_center_client_ = this->create_client<CaptureCenterSrv>(trajectory_capture_center_service_);
-    interception_arm_client_ = this->create_client<TriggerSrv>(interception_arm_service_);
-    interception_disarm_client_ = this->create_client<TriggerSrv>(interception_disarm_service_);
+    scene_interception_arm_client_ = this->create_client<TriggerSrv>(scene_interception_arm_service_);
+    scene_interception_disarm_client_ = this->create_client<TriggerSrv>(scene_interception_disarm_service_);
+    rollout_interception_arm_client_ = this->create_client<TriggerSrv>(rollout_interception_arm_service_);
+    rollout_interception_disarm_client_ = this->create_client<TriggerSrv>(rollout_interception_disarm_service_);
     reset_episode_counter_service_server_ = this->create_service<TriggerSrv>(
       reset_episode_counter_service_,
       std::bind(
@@ -244,8 +266,13 @@ public:
     RCLCPP_INFO(this->get_logger(), "Trajectory action: %s", trajectory_action_name_.c_str());
     RCLCPP_INFO(this->get_logger(), "Trajectory capture service: %s", trajectory_capture_center_service_.c_str());
     RCLCPP_INFO(this->get_logger(), "Reset episode counter service: %s", reset_episode_counter_service_.c_str());
-    RCLCPP_INFO(this->get_logger(), "Interception arm service: %s", interception_arm_service_.c_str());
-    RCLCPP_INFO(this->get_logger(), "Interception disarm service: %s", interception_disarm_service_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Scene interception arm service: %s", scene_interception_arm_service_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Scene interception disarm service: %s", scene_interception_disarm_service_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Rollout interception arm service: %s", rollout_interception_arm_service_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Rollout interception disarm service: %s", rollout_interception_disarm_service_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Interception arm mode topic: %s", interception_arm_mode_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Interception arm inhibit topic: %s", interception_arm_inhibit_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Initial interception arm mode: %s", interception_arm_mode_.c_str());
     RCLCPP_INFO(
       this->get_logger(),
       "PS4 mapping: L1: Arm interception (button index %d)",
@@ -325,94 +352,200 @@ private:
     return buttonSafe(buttons, idx) == 1;
   }
 
-  void requestInterceptionArm()
+  static std::string normalizeInterceptionArmMode(const std::string & mode)
   {
-    if (interception_arm_request_pending_)
+    std::string normalized = mode;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (normalized == "scene" || normalized == "rollout" || normalized == "both")
     {
-      RCLCPP_INFO(this->get_logger(), "Ignoring interception ARM press: previous ARM request is still pending.");
+      return normalized;
+    }
+    return "";
+  }
+
+  void interceptionArmModeCallback(const std_msgs::msg::String::SharedPtr msg)
+  {
+    const std::string raw_mode = msg ? msg->data : std::string();
+    const std::string normalized = normalizeInterceptionArmMode(raw_mode);
+    if (normalized.empty())
+    {
+      RCLCPP_WARN(this->get_logger(), "Ignoring invalid interception arm mode message: '%s'", raw_mode.c_str());
       return;
     }
+    if (normalized == interception_arm_mode_)
+    {
+      return;
+    }
+    interception_arm_mode_ = normalized;
+    RCLCPP_INFO(this->get_logger(), "Interception arm mode updated to '%s'", interception_arm_mode_.c_str());
+  }
 
-    if (!interception_arm_client_->service_is_ready())
+  void interceptionArmInhibitCallback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    const bool inhibit = msg ? static_cast<bool>(msg->data) : false;
+    if (inhibit == interception_arm_inhibit_)
+    {
+      return;
+    }
+    interception_arm_inhibit_ = inhibit;
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Interception arm inhibit %s",
+      interception_arm_inhibit_ ? "ENABLED" : "DISABLED");
+  }
+
+  bool requestSingleInterception(
+    const std::string & action_name,
+    const std::string & label,
+    const std::string & service_name,
+    rclcpp::Client<TriggerSrv>::SharedPtr client,
+    bool * pending_flag)
+  {
+    if (pending_flag == nullptr)
+    {
+      return false;
+    }
+
+    if (*pending_flag)
+    {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "Ignoring interception %s for %s: previous request is still pending.",
+        action_name.c_str(),
+        label.c_str());
+      return false;
+    }
+
+    if (!client->service_is_ready())
     {
       RCLCPP_WARN(
         this->get_logger(),
-        "Interception ARM request not sent: service unavailable (%s).",
-        interception_arm_service_.c_str());
-      return;
+        "Interception %s request not sent for %s: service unavailable (%s).",
+        action_name.c_str(),
+        label.c_str(),
+        service_name.c_str());
+      return false;
     }
 
-    interception_arm_request_pending_ = true;
+    *pending_flag = true;
     auto req = std::make_shared<TriggerSrv::Request>();
-    interception_arm_client_->async_send_request(
+    client->async_send_request(
       req,
-      [this](rclcpp::Client<TriggerSrv>::SharedFuture future)
+      [this, action_name, label, pending_flag](rclcpp::Client<TriggerSrv>::SharedFuture future)
       {
-        interception_arm_request_pending_ = false;
+        *pending_flag = false;
         try
         {
           const auto response = future.get();
           if (response->success)
           {
-            RCLCPP_INFO(this->get_logger(), "Interception ARM succeeded: %s", response->message.c_str());
+            RCLCPP_INFO(
+              this->get_logger(),
+              "Interception %s succeeded (%s): %s",
+              action_name.c_str(),
+              label.c_str(),
+              response->message.c_str());
           }
           else
           {
-            RCLCPP_WARN(this->get_logger(), "Interception ARM failed: %s", response->message.c_str());
+            RCLCPP_WARN(
+              this->get_logger(),
+              "Interception %s failed (%s): %s",
+              action_name.c_str(),
+              label.c_str(),
+              response->message.c_str());
           }
         }
         catch (const std::exception & e)
         {
-          RCLCPP_ERROR(this->get_logger(), "Interception ARM call failed: %s", e.what());
+          RCLCPP_ERROR(
+            this->get_logger(),
+            "Interception %s call failed (%s): %s",
+            action_name.c_str(),
+            label.c_str(),
+            e.what());
         }
       });
+    return true;
+  }
 
-    RCLCPP_INFO(this->get_logger(), "L1 requested interception ARM.");
+  void requestInterceptionArm()
+  {
+    if (interception_arm_inhibit_)
+    {
+      RCLCPP_WARN(this->get_logger(), "Interception ARM blocked: execution mode transition is active.");
+      return;
+    }
+
+    const std::string mode = normalizeInterceptionArmMode(interception_arm_mode_).empty()
+      ? "scene"
+      : interception_arm_mode_;
+    bool any_sent = false;
+
+    if (mode == "scene" || mode == "both")
+    {
+      any_sent = requestSingleInterception(
+        "ARM",
+        "scene",
+        scene_interception_arm_service_,
+        scene_interception_arm_client_,
+        &scene_interception_arm_request_pending_) || any_sent;
+    }
+    if (mode == "rollout" || mode == "both")
+    {
+      any_sent = requestSingleInterception(
+        "ARM",
+        "rollout",
+        rollout_interception_arm_service_,
+        rollout_interception_arm_client_,
+        &rollout_interception_arm_request_pending_) || any_sent;
+    }
+
+    if (any_sent)
+    {
+      RCLCPP_INFO(this->get_logger(), "L1 requested interception ARM in mode=%s.", mode.c_str());
+    }
+    else
+    {
+      RCLCPP_WARN(this->get_logger(), "No interception ARM request was sent in mode=%s.", mode.c_str());
+    }
   }
 
   void requestInterceptionDisarm()
   {
-    if (interception_disarm_request_pending_)
+    const std::string mode = normalizeInterceptionArmMode(interception_arm_mode_).empty()
+      ? "scene"
+      : interception_arm_mode_;
+    bool any_sent = false;
+
+    if (mode == "scene" || mode == "both")
     {
-      RCLCPP_INFO(this->get_logger(), "Ignoring interception DISARM press: previous DISARM request is still pending.");
-      return;
+      any_sent = requestSingleInterception(
+        "DISARM",
+        "scene",
+        scene_interception_disarm_service_,
+        scene_interception_disarm_client_,
+        &scene_interception_disarm_request_pending_) || any_sent;
+    }
+    if (mode == "rollout" || mode == "both")
+    {
+      any_sent = requestSingleInterception(
+        "DISARM",
+        "rollout",
+        rollout_interception_disarm_service_,
+        rollout_interception_disarm_client_,
+        &rollout_interception_disarm_request_pending_) || any_sent;
     }
 
-    if (!interception_disarm_client_->service_is_ready())
+    if (any_sent)
     {
-      RCLCPP_WARN(
-        this->get_logger(),
-        "Interception DISARM request not sent: service unavailable (%s).",
-        interception_disarm_service_.c_str());
-      return;
+      RCLCPP_INFO(this->get_logger(), "Interception DISARM request sent in mode=%s.", mode.c_str());
     }
-
-    interception_disarm_request_pending_ = true;
-    auto req = std::make_shared<TriggerSrv::Request>();
-    interception_disarm_client_->async_send_request(
-      req,
-      [this](rclcpp::Client<TriggerSrv>::SharedFuture future)
-      {
-        interception_disarm_request_pending_ = false;
-        try
-        {
-          const auto response = future.get();
-          if (response->success)
-          {
-            RCLCPP_INFO(this->get_logger(), "Interception DISARM succeeded: %s", response->message.c_str());
-          }
-          else
-          {
-            RCLCPP_WARN(this->get_logger(), "Interception DISARM failed: %s", response->message.c_str());
-          }
-        }
-        catch (const std::exception & e)
-        {
-          RCLCPP_ERROR(this->get_logger(), "Interception DISARM call failed: %s", e.what());
-        }
-      });
-
-    RCLCPP_INFO(this->get_logger(), "Interception DISARM request sent.");
+    else
+    {
+      RCLCPP_WARN(this->get_logger(), "No interception DISARM request was sent in mode=%s.", mode.c_str());
+    }
   }
 
   bool gripperBlockedByTransition() const
@@ -1804,8 +1937,14 @@ private:
   std::string trajectory_action_name_;
   std::string trajectory_capture_center_service_;
   std::string reset_episode_counter_service_;
-  std::string interception_arm_service_;
-  std::string interception_disarm_service_;
+  std::string scene_interception_arm_service_;
+  std::string scene_interception_disarm_service_;
+  std::string rollout_interception_arm_service_;
+  std::string rollout_interception_disarm_service_;
+  std::string interception_arm_mode_topic_;
+  std::string interception_arm_inhibit_topic_;
+  std::string interception_arm_mode_{"scene"};
+  bool interception_arm_inhibit_{false};
   std::string initial_motion_interface_;
   bool trajectory_armed_by_default_{true};
   std::string trajectory_profile_name_;
@@ -1850,8 +1989,10 @@ private:
   bool current_gripper_inhibited_{true};
   bool has_published_gripper_inhibit_{false};
   bool episode_recording_{false};
-  bool interception_arm_request_pending_{false};
-  bool interception_disarm_request_pending_{false};
+  bool scene_interception_arm_request_pending_{false};
+  bool scene_interception_disarm_request_pending_{false};
+  bool rollout_interception_arm_request_pending_{false};
+  bool rollout_interception_disarm_request_pending_{false};
   uint32_t num_valid_episodes_{0};
 
   std::vector<int32_t> prev_buttons_;
@@ -1873,6 +2014,8 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr spacemouse_sub_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr spacemouse_buttons_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr interception_arm_mode_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr interception_arm_inhibit_sub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr episode_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt32>::SharedPtr num_valid_episodes_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr teleop_pub_;
@@ -1886,8 +2029,10 @@ private:
   rclcpp_action::Client<TrajectoryAction>::SharedPtr trajectory_client_;
   TrajectoryGoalHandle::SharedPtr trajectory_goal_handle_;
   rclcpp::Client<CaptureCenterSrv>::SharedPtr capture_center_client_;
-  rclcpp::Client<TriggerSrv>::SharedPtr interception_arm_client_;
-  rclcpp::Client<TriggerSrv>::SharedPtr interception_disarm_client_;
+  rclcpp::Client<TriggerSrv>::SharedPtr scene_interception_arm_client_;
+  rclcpp::Client<TriggerSrv>::SharedPtr scene_interception_disarm_client_;
+  rclcpp::Client<TriggerSrv>::SharedPtr rollout_interception_arm_client_;
+  rclcpp::Client<TriggerSrv>::SharedPtr rollout_interception_disarm_client_;
   rclcpp::Service<TriggerSrv>::SharedPtr reset_episode_counter_service_server_;
   rclcpp::Time home_block_until_;
   rclcpp::TimerBase::SharedPtr delayed_home_timer_;
