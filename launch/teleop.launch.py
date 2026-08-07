@@ -47,9 +47,15 @@ def generate_launch_description():
         default_value="",
         description="Name prefix used when bag_name is empty",
     )
+    enable_latency_trace_arg = DeclareLaunchArgument(
+        "enable_latency_trace",
+        default_value="false",
+        description="Enable latency tracing in interception controller nodes",
+    )
     bag_name = LaunchConfiguration("bag_name")
     target_dir = LaunchConfiguration("target_dir")
     prefix = LaunchConfiguration("prefix")
+    enable_latency_trace = LaunchConfiguration("enable_latency_trace")
 
     dashboard_node = Node(
         package="fr3_teleop",
@@ -85,6 +91,7 @@ def generate_launch_description():
             "command_source": "scene",
             "execution_backend": "cont_tracker",
             "vmax": "1.2",
+            "enable_latency_trace": enable_latency_trace,
         }.items(),
     )
 
@@ -101,6 +108,7 @@ def generate_launch_description():
             "rollout_prediction_timeout_sec": "0.25",
             "rollout_min_target_s_m": "-0.15",
             "rollout_max_target_s_m": "0.15",
+            "enable_latency_trace": enable_latency_trace,
         }.items(),
     )
 
@@ -108,6 +116,7 @@ def generate_launch_description():
         bag_name_arg,
         target_dir_arg,
         prefix_arg,
+        enable_latency_trace_arg,
         record_manager_node,
         Node(
             package="joy",
@@ -151,4 +160,3 @@ def generate_launch_description():
 
         #vision_node,
     ])
-

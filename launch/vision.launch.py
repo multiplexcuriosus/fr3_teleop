@@ -38,10 +38,42 @@ def generate_launch_description():
         "event_frame_ch2_ms",
         default_value=str(OPENMV_PARAMS.get("event_frame_ch2_ms", 1000.0)),
     )
+    event_output_mode_arg = DeclareLaunchArgument(
+        "event_output_mode",
+        default_value="legacy_flags",
+    )
+    event_voxel_bin_ms_arg = DeclareLaunchArgument(
+        "event_voxel_bin_ms",
+        default_value="1.0",
+    )
+    event_voxel_temporal_bins_arg = DeclareLaunchArgument(
+        "event_voxel_temporal_bins",
+        default_value="9",
+    )
+    event_voxel_publish_fps_arg = DeclareLaunchArgument(
+        "event_voxel_publish_fps",
+        default_value="30.0",
+    )
+    event_diagnostics_enabled_arg = DeclareLaunchArgument(
+        "event_diagnostics_enabled",
+        default_value="false",
+    )
 
     event_frame_ch0_ms = LaunchConfiguration("event_frame_ch0_ms")
     event_frame_ch1_ms = LaunchConfiguration("event_frame_ch1_ms")
     event_frame_ch2_ms = LaunchConfiguration("event_frame_ch2_ms")
+    event_output_mode = LaunchConfiguration("event_output_mode")
+    event_voxel_bin_ms = LaunchConfiguration("event_voxel_bin_ms")
+    event_voxel_temporal_bins = LaunchConfiguration("event_voxel_temporal_bins")
+    event_voxel_publish_fps = LaunchConfiguration("event_voxel_publish_fps")
+    event_diagnostics_enabled = LaunchConfiguration("event_diagnostics_enabled")
+
+    enable_latency_trace_arg = DeclareLaunchArgument(
+        "enable_latency_trace",
+        default_value="false",
+        description="Enable latency tracing in the vision pipeline",
+    )
+    enable_latency_trace = LaunchConfiguration("enable_latency_trace")
 
     inhibit_scene_localizer_arg = DeclareLaunchArgument(
         "inhibit_scene_localizer",
@@ -70,7 +102,12 @@ def generate_launch_description():
         launch_arguments={
             "event_frame_ch0_ms": event_frame_ch0_ms,
             "event_frame_ch1_ms": event_frame_ch1_ms,
-            "event_frame_ch2_ms": event_frame_ch2_ms
+            "event_frame_ch2_ms": event_frame_ch2_ms,
+            "event_output_mode": event_output_mode,
+            "event_voxel_bin_ms": event_voxel_bin_ms,
+            "event_voxel_temporal_bins": event_voxel_temporal_bins,
+            "event_voxel_publish_fps": event_voxel_publish_fps,
+            "event_diagnostics_enabled": event_diagnostics_enabled,
         }.items(),
     )
 
@@ -81,7 +118,8 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "input_image_topic": TOPICS["rgb_image"]
+                "input_image_topic": TOPICS["rgb_image"],
+                "enable_latency_trace": enable_latency_trace,
             }
         ]
     )
@@ -89,7 +127,7 @@ def generate_launch_description():
     realsense_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(realsense_launch_path),
         launch_arguments={
-            "serial_no": "_243722074377", # my-own: _017322074405
+            "serial_no": "_243722074377", # lab: _243722074377, meine: _017322074405
             "camera_namespace": "top_cam",
             "camera_name": "camera",
 
@@ -121,6 +159,7 @@ def generate_launch_description():
             "inhibit_scene_localizer_debug": inhibit_scene_localizer_debug,
             "inhibit_ball_3d_pose_estimator": inhibit_ball_3d_pose_estimator,
             "inhibit_ball_trajectory_estimator": inhibit_ball_trajectory_estimator,
+            "enable_latency_trace": enable_latency_trace,
         }.items(),
     )
 
@@ -142,6 +181,12 @@ def generate_launch_description():
         event_frame_ch0_ms_arg,
         event_frame_ch1_ms_arg,
         event_frame_ch2_ms_arg,
+        event_output_mode_arg,
+        event_voxel_bin_ms_arg,
+        event_voxel_temporal_bins_arg,
+        event_voxel_publish_fps_arg,
+        event_diagnostics_enabled_arg,
+        enable_latency_trace_arg,
         inhibit_scene_localizer_arg,
         inhibit_scene_localizer_debug_arg,
         inhibit_ball_3d_pose_estimator_arg,

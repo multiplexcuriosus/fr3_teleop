@@ -52,7 +52,7 @@ public:
     button_home_ = this->declare_parameter<int>("button_home", 1);                    // circle
     axis_teleop_ = this->declare_parameter<int>("axis_teleop", 7);
     button_trajectory_phase_test_ = this->declare_parameter<int>("button_trajectory_phase_test", 3);  // square
-    button_capture_line_center_ = this->declare_parameter<int>("button_capture_line_center", 5);      // R1
+    button_interception_disarm_ = this->declare_parameter<int>("button_interception_disarm", 5);      // R1
 
     interception_arm_button_ = this->declare_parameter<int>("interception_arm_button", 4);            // L1
 
@@ -277,6 +277,10 @@ public:
       this->get_logger(),
       "PS4 mapping: L1: Arm interception (button index %d)",
       interception_arm_button_);
+    RCLCPP_INFO(
+      this->get_logger(),
+      "PS4 mapping: R1: Disarm interception (button index %d)",
+      button_interception_disarm_);
     RCLCPP_INFO(this->get_logger(), "Trajectory armed on startup: %s", trajectory_armed_ ? "true" : "false");
     RCLCPP_INFO(this->get_logger(), "SpaceMouse timeout (ms): %d", spacemouse_timeout_ms_);
     RCLCPP_INFO(this->get_logger(), "SpaceMouse rotation enabled: %s", spacemouse_enable_rotation_ ? "true" : "false");
@@ -714,9 +718,9 @@ private:
       return;
     }
 
-    if (risingEdge(msg->buttons, button_capture_line_center_))
+    if (risingEdge(msg->buttons, button_interception_disarm_))
     {
-      handleCaptureLineCenterPressed();
+      requestInterceptionDisarm();
     }
 
     if (risingEdge(msg->buttons, button_episode_cancel_) && isTrajectoryBlocked())
@@ -1214,10 +1218,10 @@ private:
       });
   }
 
-  // Shared capture-line-center request logic used by both the manual R1
-  // button handler and the automatic post-Home capture.
+  // Shared capture-line-center request logic used by manual trigger paths
+  // and automatic post-Home capture.
   //
-  // bypass_home_transition_check: when false (manual/R1 path), all existing
+  // bypass_home_transition_check: when false (manual path), all existing
   // safety checks apply unchanged, including the home/recovery guard and the
   // home_block_until_ settle window. When true (automatic post-Home path),
   // the home/recovery guard is skipped so capture is not rejected solely
@@ -1887,7 +1891,7 @@ private:
   int axis_teleop_;
   int button_home_;
   int button_trajectory_phase_test_;
-  int button_capture_line_center_;
+  int button_interception_disarm_;
   int interception_arm_button_;
 
   int left_stick_x_idx_;
