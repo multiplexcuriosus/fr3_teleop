@@ -190,6 +190,8 @@ class TeleopState:
     episode_start_monotonic: Optional[float] = None
     episode_elapsed_frozen: float = 0.0
     reset_episode_counter_pending: bool = False
+    table_pose_frozen: bool = False
+    aruco_transition_pending: bool = False
 
     interception_arm_mode: str = "scene"
     scene_interception_status: str = "state=UNKNOWN"
@@ -1250,6 +1252,79 @@ class RGBModeControlCard(QFrame):
             self.raw_debug_button.setText("RGB: Raw")
             self.raw_debug_button.setStyleSheet("background-color: #0051a8; color: white;")
 
+
+class ArucoLocalizationControlCard(QFrame):
+    def __init__(self, on_freeze, on_reacquire):
+        super().__init__()
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #111111;
+                border: 1px solid #444444;
+                border-radius: 10px;
+            }
+            QPushButton {
+                color: white;
+                border: 1px solid #555555;
+                border-radius: 8px;
+                padding: 8px 8px;
+                font-size: 13px;
+                font-weight: 700;
+                min-height: 22px;
+            }
+            QPushButton:disabled {
+                background-color: #2d2d2d;
+                color: #888888;
+            }
+        """)
+
+        self.status_label = QLabel()
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setWordWrap(True)
+
+        self.freeze_button = QPushButton("Freeze Table Pose")
+        self.reacquire_button = QPushButton("Reacquire ArUco")
+        self.freeze_button.clicked.connect(on_freeze)
+        self.reacquire_button.clicked.connect(on_reacquire)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(6)
+        button_row.addWidget(self.freeze_button)
+        button_row.addWidget(self.reacquire_button)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(10, 12, 10, 12)
+        layout.setSpacing(10)
+        layout.addWidget(self.status_label, 1)
+        layout.addLayout(button_row)
+        self.setLayout(layout)
+        self.set_state(table_pose_frozen=False, pending=False)
+
+    def set_state(self, table_pose_frozen: bool, pending: bool):
+        if pending:
+            text = "Aruco-Loc-Transitioning"
+            background = "#6b5500"
+        elif table_pose_frozen:
+            text = "Aruco-Loc-Deactivated"
+            background = "#008c3a"
+        else:
+            text = "Aruco-Loc-Active"
+            background = "#555555"
+
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"""
+            QLabel {{
+                background-color: {background};
+                color: white;
+                border-radius: 8px;
+                padding: 8px;
+                font-size: 14px;
+                font-weight: 800;
+            }}
+        """)
+        self.freeze_button.setEnabled(not pending and not table_pose_frozen)
+        self.reacquire_button.setEnabled(not pending and table_pose_frozen)
+
 class TeleopCard(QFrame):
     def __init__(self):
         super().__init__()
@@ -1349,6 +1424,7 @@ class TeleopDashboardNode(Node):
         self.declare_parameter("episode_control_topic", "/episode/control")
         self.declare_parameter("teleop_control_topic", "/teleop/control")
         self.declare_parameter("num_valid_episodes_topic", "/data_collection/num_valid_episodes")
+        self.declare_parameter("table_pose_frozen_topic", "/scene_localizer/table_pose_frozen")
         self.declare_parameter("start_recording_service", "/record_manager/start_recording")
         self.declare_parameter("stop_recording_service", "/record_manager/stop_recording")
         self.declare_parameter("set_debug_bypass_service", "/record_manager/set_debug_bypass_topic_presence")
@@ -1370,6 +1446,8 @@ class TeleopDashboardNode(Node):
         self.declare_parameter("interception_arm_inhibit_topic", "/teleop/interception_arm_inhibit")
         self.declare_parameter("interception_status_stale_sec", 2.0)
         self.declare_parameter("reset_episode_counter_service", "/data_collection/reset_episode_counter")
+        self.declare_parameter("freeze_table_pose_service", "/scene_localizer/freeze_table_pose")
+        self.declare_parameter("reacquire_table_pose_service", "/scene_localizer/reacquire_table_pose")
         self.declare_parameter("line_ee_name", "right_fr3_hand_tcp")
         self.declare_parameter("line_profile_name", "goto_s_x_10cm")
         self.declare_parameter("service_timeout_sec", 3.0)
@@ -1397,6 +1475,7 @@ class TeleopDashboardNode(Node):
         self.episode_control_topic = self.get_parameter("episode_control_topic").value
         self.teleop_control_topic = self.get_parameter("teleop_control_topic").value
         self.num_valid_episodes_topic = self.get_parameter("num_valid_episodes_topic").value
+        self.table_pose_frozen_topic = self.get_parameter("table_pose_frozen_topic").value
         self.start_recording_service = self.get_parameter("start_recording_service").value
         self.stop_recording_service = self.get_parameter("stop_recording_service").value
         self.set_debug_bypass_service = self.get_parameter("set_debug_bypass_service").value
@@ -1420,6 +1499,8 @@ class TeleopDashboardNode(Node):
         self.interception_arm_mode_topic = self.get_parameter("interception_arm_mode_topic").value
         self.interception_arm_inhibit_topic = self.get_parameter("interception_arm_inhibit_topic").value
         self.reset_episode_counter_service = self.get_parameter("reset_episode_counter_service").value
+        self.freeze_table_pose_service = self.get_parameter("freeze_table_pose_service").value
+        self.reacquire_table_pose_service = self.get_parameter("reacquire_table_pose_service").value
         self._interception_transition_active = False
         self._interception_arm_inhibit_active = False
 
@@ -1482,6 +1563,21 @@ class TeleopDashboardNode(Node):
             self.rollout_interception_set_dry_run_service,
         )
         self.reset_episode_counter_client = self.create_client(Trigger, self.reset_episode_counter_service)
+        self.freeze_table_pose_client = self.create_client(Trigger, self.freeze_table_pose_service)
+        self.reacquire_table_pose_client = self.create_client(Trigger, self.reacquire_table_pose_service)
+
+        frozen_status_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.table_pose_frozen_sub = self.create_subscription(
+            Bool,
+            self.table_pose_frozen_topic,
+            self.table_pose_frozen_cb,
+            frozen_status_qos,
+        )
 
         self.scene_interception_status_sub = self.create_subscription(
             String,
@@ -2285,6 +2381,11 @@ class TeleopDashboardNode(Node):
         with self.state_lock:
             self.state.successful_episodes = int(msg.data)
 
+    def table_pose_frozen_cb(self, msg: Bool):
+        with self.state_lock:
+            self.state.table_pose_frozen = bool(msg.data)
+            self.state.aruco_transition_pending = False
+
     def teleop_control_cb(self, msg: UInt8):
         with self.state_lock:
             cmd = int(msg.data)
@@ -2343,6 +2444,46 @@ class TeleopDashboardNode(Node):
             on_failure,
         )
 
+    def _request_aruco_localization_transition(self, freeze: bool):
+        action = "freeze" if freeze else "reacquire"
+        with self.state_lock:
+            if self.state.aruco_transition_pending:
+                return
+            self.state.aruco_transition_pending = True
+
+        client = self.freeze_table_pose_client if freeze else self.reacquire_table_pose_client
+        service_name = self.freeze_table_pose_service if freeze else self.reacquire_table_pose_service
+
+        def on_success():
+            with self.state_lock:
+                # The retained frozen-status topic will subsequently confirm the
+                # scene-localizer state for late joiners and lifecycle completion.
+                self.state.table_pose_frozen = bool(freeze)
+                self.state.aruco_transition_pending = False
+                if freeze:
+                    self.state.last_service_status = (
+                        "Table pose frozen; ArUco localization deactivated."
+                    )
+                else:
+                    self.state.last_service_status = (
+                        "ArUco table-pose reacquisition requested."
+                    )
+                return self.state.last_service_status
+
+        def on_failure(reason: str):
+            with self.state_lock:
+                self.state.aruco_transition_pending = False
+                self.state.last_service_status = f"ArUco {action} failed: {reason}"
+                return self.state.last_service_status
+
+        self.call_trigger_service_async(client, service_name, on_success, on_failure)
+
+    def freeze_table_pose(self):
+        self._request_aruco_localization_transition(freeze=True)
+
+    def reacquire_table_pose(self):
+        self._request_aruco_localization_transition(freeze=False)
+
     def get_state_snapshot(self) -> TeleopState:
         with self.state_lock:
             s = self.state
@@ -2358,6 +2499,8 @@ class TeleopDashboardNode(Node):
                 episode_start_monotonic=s.episode_start_monotonic,
                 episode_elapsed_frozen=s.episode_elapsed_frozen,
                 reset_episode_counter_pending=s.reset_episode_counter_pending,
+                table_pose_frozen=s.table_pose_frozen,
+                aruco_transition_pending=s.aruco_transition_pending,
                 interception_arm_mode=s.interception_arm_mode,
                 scene_interception_status=s.scene_interception_status,
                 rollout_interception_status=s.rollout_interception_status,
@@ -2709,6 +2852,10 @@ class TeleopDashboardWindow(QMainWindow):
             initial_overlay=self.use_overlay_rgb,
             initial_source=self.node.selected_rgb_source,
         )
+        self.aruco_localization_card = ArucoLocalizationControlCard(
+            on_freeze=self.node.freeze_table_pose,
+            on_reacquire=self.node.reacquire_table_pose,
+        )
         self.success_card = MetricCard(
             "Successful Episodes",
             "0",
@@ -2718,7 +2865,11 @@ class TeleopDashboardWindow(QMainWindow):
         self.duration_card = MetricCard("Current Episode [s]", "0.0")
 
         top_row.addWidget(self.teleop_episode_card, 1)
-        top_row.addWidget(self.rgb_mode_card, 1)
+        rgb_aruco_slot = QHBoxLayout()
+        rgb_aruco_slot.setSpacing(10)
+        rgb_aruco_slot.addWidget(self.rgb_mode_card, 1)
+        rgb_aruco_slot.addWidget(self.aruco_localization_card, 1)
+        top_row.addLayout(rgb_aruco_slot, 1)
         top_row.addWidget(self.success_card, 1)
         top_row.addWidget(self.duration_card, 1)
 
@@ -2900,6 +3051,10 @@ class TeleopDashboardWindow(QMainWindow):
         self.event_frames_card.set_visualization_mode(self.node.selected_event_frame_visualization)
         self.rgb_mode_card.set_overlay_mode(self.use_overlay_rgb)
         self.rgb_mode_card.set_source_mode(self.node.selected_rgb_source)
+        self.aruco_localization_card.set_state(
+            table_pose_frozen=s.table_pose_frozen,
+            pending=s.aruco_transition_pending,
+        )
         execution_mode, arm_allowed, arm_block_reason = self.node.get_interception_execution_snapshot()
         self.interception_card.set_controller_statuses(
             mode=s.interception_arm_mode,

@@ -106,6 +106,7 @@ TOPICS = {
         "/scene_localizer/table_pose_robot_base",
     "camera_pose_robot_base":
         "/scene_localizer/top_cam/camera_pose_robot_base",
+    "table_pose_frozen": "/scene_localizer/table_pose_frozen",
     "tf": "/tf",
     "tf_static": "/tf_static",
 
@@ -143,6 +144,8 @@ SERVICES = {
         "/rollout_interception_controller/disarm",
     "rollout_interception_set_dry_run":
         "/rollout_interception_controller/set_dry_run",
+    "freeze_table_pose": "/scene_localizer/freeze_table_pose",
+    "reacquire_table_pose": "/scene_localizer/reacquire_table_pose",
 }
 
 # ---------------------------------------------------------------------------
@@ -281,6 +284,7 @@ DASHBOARD_INTERFACE_PARAMS = {
     "teleop_control_topic": TOPICS["teleop_control"],
     "num_valid_episodes_topic":
         TOPICS["num_valid_episodes"],
+    "table_pose_frozen_topic": TOPICS["table_pose_frozen"],
 
     "start_recording_service":
         SERVICES["start_recording"],
@@ -290,6 +294,8 @@ DASHBOARD_INTERFACE_PARAMS = {
         SERVICES["set_debug_bypass"],
     "reset_episode_counter_service":
         SERVICES["reset_episode_counter"],
+    "freeze_table_pose_service": SERVICES["freeze_table_pose"],
+    "reacquire_table_pose_service": SERVICES["reacquire_table_pose"],
 
     "start_event_frames_service":
         SERVICES["start_event_frames"],
