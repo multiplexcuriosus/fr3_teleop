@@ -68,6 +68,21 @@ def generate_launch_description():
     event_voxel_publish_fps = LaunchConfiguration("event_voxel_publish_fps")
     event_diagnostics_enabled = LaunchConfiguration("event_diagnostics_enabled")
 
+    event_tracker_debug_enabled_arg = DeclareLaunchArgument(
+        "event_tracker_debug_enabled",
+        default_value="true",
+    )
+    event_tracker_debug_clip_count_arg = DeclareLaunchArgument(
+        "event_tracker_debug_clip_count",
+        default_value="2",
+    )
+    event_tracker_debug_enabled = LaunchConfiguration(
+        "event_tracker_debug_enabled"
+    )
+    event_tracker_debug_clip_count = LaunchConfiguration(
+        "event_tracker_debug_clip_count"
+    )
+
     enable_latency_trace_arg = DeclareLaunchArgument(
         "enable_latency_trace",
         default_value="false",
@@ -108,6 +123,9 @@ def generate_launch_description():
             "event_voxel_temporal_bins": event_voxel_temporal_bins,
             "event_voxel_publish_fps": event_voxel_publish_fps,
             "event_diagnostics_enabled": event_diagnostics_enabled,
+            "event_tracker_debug_enabled": event_tracker_debug_enabled,
+            "event_tracker_debug_clip_count": event_tracker_debug_clip_count,
+            "publish_latency_traces": enable_latency_trace,
         }.items(),
     )
 
@@ -186,6 +204,8 @@ def generate_launch_description():
         event_voxel_temporal_bins_arg,
         event_voxel_publish_fps_arg,
         event_diagnostics_enabled_arg,
+        event_tracker_debug_enabled_arg,
+        event_tracker_debug_clip_count_arg,
         enable_latency_trace_arg,
         inhibit_scene_localizer_arg,
         inhibit_scene_localizer_debug_arg,
