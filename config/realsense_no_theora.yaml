@@ -1,0 +1,6 @@
+# image_transport advertises every installed publisher plugin by default. Keep
+# the useful transports for this color stream while omitting Theora.
+camera.color.image_raw.enable_pub_plugins:
+  - image_transport/raw
+  - image_transport/compressed
+  - image_transport/compressedDepth

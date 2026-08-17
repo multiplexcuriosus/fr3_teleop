@@ -3,7 +3,7 @@ from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import UnlessCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -12,6 +12,7 @@ from fr3_teleop.config.teleop_config import OPENMV_PARAMS
 
 
 def generate_launch_description():
+    fr3_teleop_pkg_share = get_package_share_directory("fr3_teleop")
     openmv_pkg_share = get_package_share_directory("openmv_cam")
     openmv_launch_path = os.path.join(openmv_pkg_share, "launch", "openmv.launch.py")
     scene_localizer_launch_path = os.path.join(
@@ -24,6 +25,11 @@ def generate_launch_description():
         get_package_share_directory("realsense2_camera"),
         "launch",
         "rs_launch.py"
+    )
+    realsense_config_path = os.path.join(
+        fr3_teleop_pkg_share,
+        "config",
+        "realsense_no_theora.yaml",
     )
 
     event_frame_ch0_ms_arg = DeclareLaunchArgument(
@@ -68,6 +74,15 @@ def generate_launch_description():
     event_voxel_publish_fps = LaunchConfiguration("event_voxel_publish_fps")
     event_diagnostics_enabled = LaunchConfiguration("event_diagnostics_enabled")
 
+    openmv_publish_mono_image_arg = DeclareLaunchArgument(
+        "openmv_publish_mono_image",
+        default_value="false",
+        description="Publish the OpenMV mono event image on /openmv_cam/image",
+    )
+    openmv_publish_mono_image = LaunchConfiguration(
+        "openmv_publish_mono_image"
+    )
+
     event_tracker_debug_enabled_arg = DeclareLaunchArgument(
         "event_tracker_debug_enabled",
         default_value="true",
@@ -89,6 +104,22 @@ def generate_launch_description():
         description="Enable latency tracing in the vision pipeline",
     )
     enable_latency_trace = LaunchConfiguration("enable_latency_trace")
+
+    ball_tracker_publish_mask_arg = DeclareLaunchArgument(
+        "ball_tracker_publish_mask",
+        default_value="false",
+        description="Publish the ball tracker binary mask image",
+    )
+    ball_tracker_publish_mask = LaunchConfiguration("ball_tracker_publish_mask")
+
+    aruco_top_cam_publish_debug_arg = DeclareLaunchArgument(
+        "aruco_top_cam_publish_debug",
+        default_value="false",
+        description="Expose the top-camera ArUco debug image topic",
+    )
+    aruco_top_cam_publish_debug = LaunchConfiguration(
+        "aruco_top_cam_publish_debug"
+    )
 
     inhibit_scene_localizer_arg = DeclareLaunchArgument(
         "inhibit_scene_localizer",
@@ -123,6 +154,7 @@ def generate_launch_description():
             "event_voxel_temporal_bins": event_voxel_temporal_bins,
             "event_voxel_publish_fps": event_voxel_publish_fps,
             "event_diagnostics_enabled": event_diagnostics_enabled,
+            "publish_mono_img": openmv_publish_mono_image,
             "event_tracker_debug_enabled": event_tracker_debug_enabled,
             "event_tracker_debug_clip_count": event_tracker_debug_clip_count,
             "publish_latency_traces": enable_latency_trace,
@@ -138,6 +170,7 @@ def generate_launch_description():
             {
                 "input_image_topic": TOPICS["rgb_image"],
                 "enable_latency_trace": enable_latency_trace,
+                "publish_mask": ball_tracker_publish_mask,
             }
         ]
     )
@@ -148,6 +181,7 @@ def generate_launch_description():
             "serial_no": "_243722074377", # lab: _243722074377, meine: _017322074405
             "camera_namespace": "top_cam",
             "camera_name": "camera",
+            "config_file": realsense_config_path,
 
             "enable_color": "true",
             "rgb_camera.color_profile": "1280x720x30",
@@ -191,7 +225,18 @@ def generate_launch_description():
             'cam_base_topic': TOPICS["rgb_image"],
             'marker_size': 0.0982,
             'marker_dict': '6X6_50'
-        }]
+        }],
+        remappings=[
+            (
+                '~/debug',
+                PythonExpression([
+                    "'/aruco_top_cam/aruco_top_cam/debug' if '",
+                    aruco_top_cam_publish_debug,
+                    "'.lower() in ('true', '1', 'yes', 'on') else "
+                    "'/_disabled/aruco_top_cam/debug'",
+                ]),
+            )
+        ],
     )
 
 
@@ -204,9 +249,12 @@ def generate_launch_description():
         event_voxel_temporal_bins_arg,
         event_voxel_publish_fps_arg,
         event_diagnostics_enabled_arg,
+        openmv_publish_mono_image_arg,
         event_tracker_debug_enabled_arg,
         event_tracker_debug_clip_count_arg,
         enable_latency_trace_arg,
+        ball_tracker_publish_mask_arg,
+        aruco_top_cam_publish_debug_arg,
         inhibit_scene_localizer_arg,
         inhibit_scene_localizer_debug_arg,
         inhibit_ball_3d_pose_estimator_arg,
