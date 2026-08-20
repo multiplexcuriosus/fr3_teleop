@@ -48,6 +48,10 @@ def generate_launch_description():
         "event_output_mode",
         default_value="legacy_flags",
     )
+    event_wire_mode_arg = DeclareLaunchArgument(
+        "event_wire_mode",
+        default_value="processed_evt1",
+    )
     event_voxel_bin_ms_arg = DeclareLaunchArgument(
         "event_voxel_bin_ms",
         default_value="1.0",
@@ -69,6 +73,7 @@ def generate_launch_description():
     event_frame_ch1_ms = LaunchConfiguration("event_frame_ch1_ms")
     event_frame_ch2_ms = LaunchConfiguration("event_frame_ch2_ms")
     event_output_mode = LaunchConfiguration("event_output_mode")
+    event_wire_mode = LaunchConfiguration("event_wire_mode")
     event_voxel_bin_ms = LaunchConfiguration("event_voxel_bin_ms")
     event_voxel_temporal_bins = LaunchConfiguration("event_voxel_temporal_bins")
     event_voxel_publish_fps = LaunchConfiguration("event_voxel_publish_fps")
@@ -150,6 +155,7 @@ def generate_launch_description():
             "event_frame_ch1_ms": event_frame_ch1_ms,
             "event_frame_ch2_ms": event_frame_ch2_ms,
             "event_output_mode": event_output_mode,
+            "event_wire_mode": event_wire_mode,
             "event_voxel_bin_ms": event_voxel_bin_ms,
             "event_voxel_temporal_bins": event_voxel_temporal_bins,
             "event_voxel_publish_fps": event_voxel_publish_fps,
@@ -245,6 +251,7 @@ def generate_launch_description():
         event_frame_ch1_ms_arg,
         event_frame_ch2_ms_arg,
         event_output_mode_arg,
+        event_wire_mode_arg,
         event_voxel_bin_ms_arg,
         event_voxel_temporal_bins_arg,
         event_voxel_publish_fps_arg,
